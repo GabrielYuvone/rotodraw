@@ -233,6 +233,22 @@ interface RotoState {
     target: Vec2
   ) => void;
   /**
+   * Insert a "drawing break" at the given frame for the given sub-layer.
+   * This marks the start of a new independent drawing within the same
+   * sub-layer: interpolation will not cross this break, and frames in the
+   * new span (before the user draws the first keyframe) will be blank.
+   * The active sub-layer's shapes at this frame are also cleared so the
+   * drawing truly starts fresh.
+   */
+  insertDrawingBreak: (subLayerId: string, frameIndex: number) => void;
+  /** Remove a drawing break. Re-enables interpolation across this frame. */
+  removeDrawingBreak: (subLayerId: string, frameIndex: number) => void;
+  /**
+   * Toggle a drawing break (insert if absent, remove if present).
+   * Convenience action for UI buttons.
+   */
+  toggleDrawingBreak: (subLayerId: string, frameIndex: number) => void;
+  /**
    * Promote a single shape from an in-between frame into its own
    * keyframe shape, so node edits operate on a concrete shape. Returns
    * nothing — the shape id is preserved.
@@ -275,10 +291,16 @@ function emptyProject(): RotoProject {
     })),
     currentFrame: 0,
     activeSubLayerId: null,
+    drawingBreaks: {},
   };
 }
 
-/** Recompute interpolated shapes for a given frame index. */
+/**
+ * Recompute interpolated shapes for a given frame index, respecting drawing
+ * breaks. The timeline is divided into spans by drawing breaks; interpolation
+ * only happens within the same span. Frames in a new (broken) span before
+ * the user draws the first keyframe are blank.
+ */
 export function getInterpolatedShapesForFrame(
   project: RotoProject,
   frameIndex: number,
@@ -290,25 +312,41 @@ export function getInterpolatedShapesForFrame(
   if (frame.isKeyframe && frame.states[subLayerId]) {
     return frame.states[subLayerId];
   }
-  // Find previous and next keyframes for this sub-layer.
+  // Find the drawing span [spanStart, spanEnd) for this sub-layer at this frame.
+  // A break at frame B means the new span starts at B (inclusive).
+  const breaks = (project.drawingBreaks?.[subLayerId] ?? [])
+    .slice()
+    .sort((a, b) => a - b);
+  let spanStart = 0;
+  let spanStartsAtBreak = false; // true if a break exists at or before frameIndex
+  let spanEnd = project.frameCount;
+  for (const b of breaks) {
+    if (b <= frameIndex) {
+      spanStart = b;
+      spanStartsAtBreak = true;
+    } else if (b > frameIndex && b < spanEnd) {
+      spanEnd = b;
+    }
+  }
+  // Find previous keyframe within [spanStart, frameIndex].
   let prevKf: Frame | null = null;
-  let nextKf: Frame | null = null;
-  for (let i = frameIndex; i >= 0; i--) {
+  for (let i = frameIndex; i >= spanStart; i--) {
     const f = project.frames[i];
     if (f.isKeyframe && f.states[subLayerId]) {
       prevKf = f;
       break;
     }
   }
-  for (let i = frameIndex; i < project.frames.length; i++) {
+  // Find next keyframe within (frameIndex, spanEnd).
+  let nextKf: Frame | null = null;
+  for (let i = frameIndex + 1; i < spanEnd; i++) {
     const f = project.frames[i];
     if (f.isKeyframe && f.states[subLayerId]) {
       nextKf = f;
       break;
     }
   }
-  // If we have prevKf, we need to look at the prev keyframe's data
-  // and the next keyframe's data, and interpolate.
+  // Interpolate between prevKf and nextKf if both exist within the same span.
   if (prevKf && nextKf && prevKf !== nextKf) {
     const prevShapes = prevKf.states[subLayerId];
     const nextShapes = nextKf.states[subLayerId];
@@ -323,9 +361,33 @@ export function getInterpolatedShapesForFrame(
     }
     return out;
   }
+  // Hold the last keyframe's shapes forward (standard animation behavior).
   if (prevKf) return prevKf.states[subLayerId] ?? [];
+  // No previous keyframe in this span. If the span starts at a drawing break,
+  // we want frames in the new span to be BLANK (the user inserted a break to
+  // start a fresh drawing). If the span starts at frame 0 (no break yet),
+  // preserve the original "hold backward from next keyframe" behavior.
+  if (spanStartsAtBreak) return [];
   if (nextKf) return nextKf.states[subLayerId] ?? [];
   return [];
+}
+
+/** Helper: does this sub-layer have a drawing break at the given frame? */
+export function hasDrawingBreak(
+  project: RotoProject,
+  subLayerId: string,
+  frameIndex: number
+): boolean {
+  const breaks = project.drawingBreaks?.[subLayerId] ?? [];
+  return breaks.includes(frameIndex);
+}
+
+/** Helper: get the sorted list of drawing breaks for a sub-layer (or []). */
+export function getDrawingBreaks(
+  project: RotoProject,
+  subLayerId: string
+): number[] {
+  return (project.drawingBreaks?.[subLayerId] ?? []).slice().sort((a, b) => a - b);
 }
 
 /** Returns the active sub-layer object. */
@@ -344,6 +406,8 @@ function withDefaultActive(proj: RotoProject): RotoProject {
     const firstSub = proj.layers[0].subLayers[0];
     if (firstSub) proj.activeSubLayerId = firstSub.id;
   }
+  // Backward-compatibility: older project JSON may not have drawingBreaks.
+  if (!proj.drawingBreaks) proj.drawingBreaks = {};
   return proj;
 }
 
@@ -371,6 +435,9 @@ export const useRotoStore = create<RotoState>((set, get) => ({
           frameCount,
           frames,
           currentFrame: 0,
+          // Reset drawing breaks when a new video is loaded — the previous
+          // break frame indices would be meaningless against a new timeline.
+          drawingBreaks: {},
         },
       };
     }),
@@ -808,6 +875,73 @@ export const useRotoStore = create<RotoState>((set, get) => ({
         states: { ...f.states, [subLayerId]: next },
       };
       return { project: { ...s.project, frames } };
+    }),
+
+  insertDrawingBreak: (subLayerId, frameIndex) =>
+    set((s) => {
+      const existingBreaks = (s.project.drawingBreaks?.[subLayerId] ?? []).slice();
+      if (existingBreaks.includes(frameIndex)) return {}; // already a break
+      const breaks = [...existingBreaks, frameIndex].sort((a, b) => a - b);
+      // Clear the sub-layer's shapes at this frame so the new drawing starts
+      // truly blank. Other sub-layers' shapes on this frame are preserved.
+      const frames = s.project.frames.slice();
+      const f = frames[frameIndex];
+      if (f) {
+        const newStates = { ...f.states };
+        delete newStates[subLayerId];
+        frames[frameIndex] = { ...f, states: newStates };
+      }
+      return {
+        project: {
+          ...s.project,
+          drawingBreaks: { ...s.project.drawingBreaks, [subLayerId]: breaks },
+          frames,
+        },
+      };
+    }),
+
+  removeDrawingBreak: (subLayerId, frameIndex) =>
+    set((s) => {
+      const breaks = (s.project.drawingBreaks?.[subLayerId] ?? []).filter(
+        (b) => b !== frameIndex
+      );
+      return {
+        project: {
+          ...s.project,
+          drawingBreaks: { ...s.project.drawingBreaks, [subLayerId]: breaks },
+        },
+      };
+    }),
+
+  toggleDrawingBreak: (subLayerId, frameIndex) =>
+    set((s) => {
+      const existingBreaks = (s.project.drawingBreaks?.[subLayerId] ?? []).slice();
+      const has = existingBreaks.includes(frameIndex);
+      let breaks: number[];
+      if (has) {
+        breaks = existingBreaks.filter((b) => b !== frameIndex);
+      } else {
+        breaks = [...existingBreaks, frameIndex].sort((a, b) => a - b);
+      }
+      // When inserting a new break, also clear the sub-layer's shapes at this
+      // frame so the new drawing starts truly blank.
+      let frames = s.project.frames;
+      if (!has) {
+        frames = s.project.frames.slice();
+        const f = frames[frameIndex];
+        if (f) {
+          const newStates = { ...f.states };
+          delete newStates[subLayerId];
+          frames[frameIndex] = { ...f, states: newStates };
+        }
+      }
+      return {
+        project: {
+          ...s.project,
+          drawingBreaks: { ...s.project.drawingBreaks, [subLayerId]: breaks },
+          frames,
+        },
+      };
     }),
 
   selectShapes: (ids) => set({ selectedShapeIds: ids }),

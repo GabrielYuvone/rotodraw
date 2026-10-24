@@ -4,6 +4,8 @@ import {
   useRotoStore,
   getActiveSubLayer,
   getInterpolatedShapesForFrame,
+  hasDrawingBreak,
+  getDrawingBreaks,
 } from "@/lib/roto/store";
 import type { VectorShape } from "@/lib/roto/types";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +20,7 @@ import {
   Info,
   Trash2,
   Palette,
+  Unlink,
 } from "lucide-react";
 
 export function PropertiesPanel() {
@@ -26,8 +29,14 @@ export function PropertiesPanel() {
   const selectedShapeIds = useRotoStore((s) => s.selectedShapeIds);
   const setShapeFillColor = useRotoStore((s) => s.setShapeFillColor);
   const deleteShape = useRotoStore((s) => s.deleteShape);
+  const toggleDrawingBreak = useRotoStore((s) => s.toggleDrawingBreak);
   const subLayer = getActiveSubLayer(project);
   const currentFrameObj = project.frames[project.currentFrame];
+  const currentFrame = project.currentFrame;
+  const breaksForActive =
+    subLayer != null ? getDrawingBreaks(project, subLayer.id) : [];
+  const hasBreakAtCurrent =
+    subLayer != null && hasDrawingBreak(project, subLayer.id, currentFrame);
   const shapeCount = subLayer
     ? getInterpolatedShapesForFrame(
         project,
@@ -287,6 +296,91 @@ export function PropertiesPanel() {
 
           <Separator />
 
+          {/* Drawing Substitutions (breaks) — multiple independent drawings
+              within the same sub-layer. */}
+          <section>
+            <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1 flex items-center gap-1">
+              <Unlink className="h-3 w-3" /> Drawing Substitutions
+            </h4>
+            <div className="rounded-md border bg-card/60 p-3 text-xs space-y-2">
+              {subLayer ? (
+                <>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">
+                      Break at frame {currentFrame + 1}
+                    </span>
+                    <span
+                      className={
+                        hasBreakAtCurrent
+                          ? "text-red-500 font-medium"
+                          : "text-muted-foreground"
+                      }
+                    >
+                      {hasBreakAtCurrent ? "Yes — fresh drawing starts here" : "No"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">
+                      Total breaks in this sub-layer
+                    </span>
+                    <span className="font-mono text-sm">
+                      {breaksForActive.length}
+                    </span>
+                  </div>
+                  {breaksForActive.length > 0 && (
+                    <div className="flex items-center gap-1 flex-wrap">
+                      <span className="text-xs text-muted-foreground">At frames:</span>
+                      {breaksForActive.map((b) => (
+                        <button
+                          key={b}
+                          onClick={() =>
+                            useRotoStore.getState().setCurrentFrame(b)
+                          }
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-mono border
+                            ${
+                              b === currentFrame
+                                ? "bg-red-500/15 border-red-500 text-red-500"
+                                : "border-border bg-card hover:bg-accent"
+                            }`}
+                          title={`Jump to frame ${b + 1}`}
+                        >
+                          {b + 1}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <Button
+                    size="sm"
+                    variant={hasBreakAtCurrent ? "destructive" : "outline"}
+                    className="w-full h-7 text-xs"
+                    onClick={() =>
+                      toggleDrawingBreak(subLayer.id, currentFrame)
+                    }
+                  >
+                    <Unlink className="h-3 w-3 mr-1" />
+                    {hasBreakAtCurrent
+                      ? "Remove Drawing Break"
+                      : "Insert Drawing Break"}
+                  </Button>
+                  <p className="text-[10px] text-muted-foreground leading-snug">
+                    Use a drawing break when a character turns drastically
+                    (e.g., front → profile). The previous drawing stops
+                    interpolating, and you start a fresh shape on this frame
+                    — all layer styles (stroke, fill) are preserved. Press
+                    <kbd className="mx-0.5 px-1 py-0.5 rounded bg-muted border border-border text-[9px]">B</kbd>
+                    as a shortcut.
+                  </p>
+                </>
+              ) : (
+                <p className="text-muted-foreground">
+                  Activate a sub-layer to manage drawing breaks.
+                </p>
+              )}
+            </div>
+          </section>
+
+          <Separator />
+
           {/* Quick tips */}
           <section>
             <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1 flex items-center gap-1">
@@ -297,6 +391,7 @@ export function PropertiesPanel() {
               <li><strong>Blob Brush</strong>: same-color strokes auto-merge into one solid fill — perfect for cel-shading blocks.</li>
               <li><strong>Knife</strong>: draw across a closed shape to slice it into independent pieces.</li>
               <li><strong>Node</strong>: click a shape to reveal control points; drag a node to move; Delete to remove.</li>
+              <li><strong>Drawing Break</strong> (<kbd>B</kbd>): insert at a turn frame to stop the previous drawing from interpolating and start a fresh shape in the same sub-layer.</li>
               <li><strong>Deform (Local)</strong>: push only the sub-layer under cursor.</li>
               <li><strong>Deform (Global)</strong>: push the entire parent layer (eyes + mouth + outlines) together.</li>
               <li>Hold <kbd>Shift</kbd> while dragging in Select mode to scale; <kbd>Alt</kbd> to rotate.</li>
@@ -312,18 +407,30 @@ export function PropertiesPanel() {
 function TweenStatus({ subLayerId }: { subLayerId: string }) {
   const project = useRotoStore((s) => s.project);
   const idx = project.currentFrame;
-
-  // Find prev / next keyframe for this sub-layer
+  const breaks = getDrawingBreaks(project, subLayerId);
+  // Compute the drawing span [spanStart, spanEnd) for the current frame.
+  let spanStart = 0;
+  let spanStartsAtBreak = false;
+  let spanEnd = project.frameCount;
+  for (const b of breaks) {
+    if (b <= idx) {
+      spanStart = b;
+      spanStartsAtBreak = true;
+    } else if (b > idx && b < spanEnd) {
+      spanEnd = b;
+    }
+  }
+  // Find prev / next keyframe WITHIN the current drawing span.
   let prevKf: number | null = null;
   let nextKf: number | null = null;
-  for (let i = idx; i >= 0; i--) {
+  for (let i = idx; i >= spanStart; i--) {
     const f = project.frames[i];
     if (f?.isKeyframe && f.states[subLayerId]) {
       prevKf = i;
       break;
     }
   }
-  for (let i = idx; i < project.frames.length; i++) {
+  for (let i = idx + 1; i < spanEnd; i++) {
     const f = project.frames[i];
     if (f?.isKeyframe && f.states[subLayerId]) {
       nextKf = i;
@@ -348,12 +455,32 @@ function TweenStatus({ subLayerId }: { subLayerId: string }) {
       <p>
         In-betweening from KF#{prevKf + 1} → KF#{nextKf + 1} at{" "}
         <span className="font-mono">{Math.round(t * 100)}%</span>.
-        Lines and fills are interpolated linearly between the two keyframes.
+        Lines and fills are interpolated linearly between the two keyframes
+        within the current drawing span.
       </p>
     );
   }
   if (prevKf !== null) {
-    return <p>Holding from previous KF#{prevKf + 1}. Add a future keyframe to tween.</p>;
+    return (
+      <p>
+        Holding from previous KF#{prevKf + 1}. Add a future keyframe in this
+        span to tween.{" "}
+        {spanEnd < project.frameCount && (
+          <span className="text-red-500">
+            (A drawing break at frame {spanEnd + 1} stops this span.)
+          </span>
+        )}
+      </p>
+    );
+  }
+  if (spanStartsAtBreak) {
+    return (
+      <p>
+        <span className="text-red-500 font-medium">Blank.</span> This frame is
+        in a new drawing span (break at frame {spanStart + 1}) with no
+        keyframe yet. Draw on this frame to start the new drawing.
+      </p>
+    );
   }
   if (nextKf !== null) {
     return <p>Holding backward from next KF#{nextKf + 1}.</p>;

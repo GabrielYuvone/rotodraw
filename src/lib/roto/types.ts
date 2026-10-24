@@ -118,6 +118,22 @@ export interface RotoProject {
   currentFrame: number;
   /** Active sub-layer id (where new strokes are drawn). */
   activeSubLayerId: string | null;
+  /**
+   * Per-sub-layer drawing breaks. Each entry is a sorted list of frame
+   * indices where a "drawing break" exists. A break marks the start of a
+   * new independent drawing within the same sub-layer, stopping
+   * interpolation from crossing it.
+   *
+   * Use case: when a character rotates drastically (e.g., front → profile),
+   * the user inserts a drawing break at that frame and starts a fresh
+   * drawing. The previous drawing's shapes will not be interpolated /
+   * stretched across the break — frames after the break are blank until
+   * the user draws a new keyframe in the new span.
+   *
+   * All layer styles (black comic stroke, blue fill, etc.) are preserved
+   * because they live on the VectorShape itself, not on the span.
+   */
+  drawingBreaks: Record<string, number[]>;
 }
 
 /** Onion skinning configuration. */

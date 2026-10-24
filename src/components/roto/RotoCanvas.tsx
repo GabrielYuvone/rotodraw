@@ -41,6 +41,7 @@ export function RotoCanvas({ videoRef }: Props) {
   const selectShapes = useRotoStore((s) => s.selectShapes);
   const clearSelection = useRotoStore((s) => s.clearSelection);
   const setBrush = useRotoStore((s) => s.setBrush);
+  const toggleDrawingBreak = useRotoStore((s) => s.toggleDrawingBreak);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -595,6 +596,16 @@ export function RotoCanvas({ videoRef }: Props) {
       ) {
         return;
       }
+      // "B" key — toggle a drawing break at the current frame for the active
+      // sub-layer. Lets the user start a fresh drawing without reaching for
+      // the toolbar.
+      if (e.key === "b" || e.key === "B") {
+        if (project.activeSubLayerId) {
+          toggleDrawingBreak(project.activeSubLayerId, project.currentFrame);
+          e.preventDefault();
+        }
+        return;
+      }
       if (e.key !== "Delete" && e.key !== "Backspace") return;
       // Node tool + selected node → delete the node.
       if (selectedNode && project.activeSubLayerId) {
@@ -622,8 +633,10 @@ export function RotoCanvas({ videoRef }: Props) {
     selectedNode,
     selectedShapeIds,
     project.activeSubLayerId,
+    project.currentFrame,
     deleteNode,
     deleteShape,
+    toggleDrawingBreak,
   ]);
 
   // ----- Mouse wheel: adjust deform/blob radius -----

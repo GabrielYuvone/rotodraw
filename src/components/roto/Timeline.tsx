@@ -12,6 +12,8 @@ import {
   Trash2,
   Layers,
   Film,
+  Unlink,
+  Link2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,7 +25,11 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { useRotoStore } from "@/lib/roto/store";
+import {
+  useRotoStore,
+  hasDrawingBreak,
+  getDrawingBreaks,
+} from "@/lib/roto/store";
 import { useEffect, useState } from "react";
 
 export function Timeline() {
@@ -33,6 +39,12 @@ export function Timeline() {
   const toggleKeyframe = useRotoStore((s) => s.toggleKeyframe);
   const clearFrame = useRotoStore((s) => s.clearFrame);
   const setOnion = useRotoStore((s) => s.setOnion);
+  const toggleDrawingBreak = useRotoStore((s) => s.toggleDrawingBreak);
+  const activeSubLayerId = project.activeSubLayerId;
+  const currentFrame = project.currentFrame;
+  const hasBreak =
+    activeSubLayerId != null &&
+    hasDrawingBreak(project, activeSubLayerId, currentFrame);
 
   const [playing, setPlaying] = useState(false);
   const rafRef = useRef<number>(0);
@@ -193,6 +205,34 @@ export function Timeline() {
             : "Make Keyframe"}
         </Button>
 
+        <TooltipProvider delayDuration={300}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant={hasBreak ? "destructive" : "outline"}
+                onClick={() => {
+                  if (!activeSubLayerId) return;
+                  toggleDrawingBreak(activeSubLayerId, currentFrame);
+                }}
+                disabled={!activeSubLayerId}
+              >
+                {hasBreak ? (
+                  <Link2 className="h-3.5 w-3.5 mr-1" />
+                ) : (
+                  <Unlink className="h-3.5 w-3.5 mr-1" />
+                )}
+                {hasBreak ? "Remove Drawing Break" : "Insert Drawing Break"}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-xs">
+              {hasBreak
+                ? "Re-enable interpolation across this frame (reconnects the previous drawing with the next)."
+                : "Start a fresh independent drawing at this frame for the active sub-layer. Stops interpolation from the previous drawing — useful when a character turns. (Shortcut: B)"}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+
         <Button
           size="sm"
           variant="ghost"
@@ -270,11 +310,17 @@ export function Timeline() {
   );
 }
 
-/** Frame-by-frame strip showing keyframe diamonds. */
+/** Frame-by-frame strip showing keyframe diamonds + drawing break indicators. */
 function FrameStrip() {
   const project = useRotoStore((s) => s.project);
   const setCurrentFrame = useRotoStore((s) => s.setCurrentFrame);
   const total = project.frameCount;
+  const activeSubLayerId = project.activeSubLayerId;
+  // Per-frame break lookup for the active sub-layer (used for the red indicator).
+  const breaks =
+    activeSubLayerId != null
+      ? new Set(getDrawingBreaks(project, activeSubLayerId))
+      : new Set<number>();
   // Cap visible frames for performance
   const VISIBLE_MAX = 60;
   const showEvery = Math.max(1, Math.ceil(total / VISIBLE_MAX));
@@ -287,6 +333,7 @@ function FrameStrip() {
       {frames.map((i) => {
         const f = project.frames[i];
         const isCurrent = i === project.currentFrame;
+        const isBreak = breaks.has(i);
         return (
           <button
             key={i}
@@ -296,8 +343,11 @@ function FrameStrip() {
                 isCurrent
                   ? "border-primary bg-primary/15 text-foreground"
                   : "border-border bg-card/60 text-muted-foreground hover:bg-accent"
-              }`}
-            title={`Frame ${i + 1}${f?.isKeyframe ? " (Keyframe)" : ""}`}
+              }
+              ${isBreak ? "border-l-2 border-l-red-500" : ""}`}
+            title={`Frame ${i + 1}${
+              f?.isKeyframe ? " (Keyframe)" : ""
+            }${isBreak ? " · Drawing Break (new drawing starts here)" : ""}`}
           >
             <span className="absolute top-0.5">
               {f?.isKeyframe && (
@@ -306,6 +356,12 @@ function FrameStrip() {
                 />
               )}
             </span>
+            {isBreak && (
+              <span
+                className="absolute -top-1 left-1/2 -translate-x-1/2 h-1.5 w-1.5 rounded-full bg-red-500 shadow-sm shadow-red-500/50"
+                aria-label="drawing break"
+              />
+            )}
             {i + 1}
           </button>
         );
