@@ -17,7 +17,15 @@ import type {
   VectorShape,
   WorkingFPS,
 } from "./types";
-import { interpolateShapes, uid } from "./geometry";
+import {
+  booleanSubtract,
+  booleanUnion,
+  interpolateShapes,
+  multiPolygonToShapes,
+  shapeToRing,
+  strokeToPolygon,
+  uid,
+} from "./geometry";
 
 // -------- Default starter project (demo "Remera" + "Cara") --------
 
@@ -101,11 +109,15 @@ function makeDefaultBrush(): BrushConfig {
     mode: "draw",
     deformRadius: 80,
     deformStrength: 0.4,
+    deformScope: "local",
     drawStrokeWidth: 3,
     drawStrokeJitter: 0.4,
     drawStrokeVariance: 0.2,
     fillColor: "#3b6fb5",
     autoClose: true,
+    blobBrushRadius: 18,
+    knifeAutoClose: true,
+    nodeSnapRadius: 12,
   };
 }
 
@@ -162,8 +174,69 @@ interface RotoState {
     shapeIds: string[],
     mutate: (pts: Vec2[]) => Vec2[]
   ) => void;
+  /**
+   * Global deform brush: deforms ALL shapes within the radius of `lastMouse`
+   * across ALL sub-layers in the parent layer that contains the active
+   * sub-layer (or the layer identified by `layerId`). Used by the deform
+   * tool when `brush.deformScope === "global"`.
+   *
+   * @param layerId The parent layer whose sub-layers should all be deformed.
+   * @param brush   Brush state: last cursor position, radius, strength,
+   *                and the cursor delta since the last mousemove.
+   */
+  liveDeformLayer: (
+    layerId: string,
+    brush: { lastMouse: Vec2; delta: Vec2; radius: number; strength: number }
+  ) => void;
   selectShapes: (ids: string[]) => void;
   clearSelection: () => void;
+  /**
+   * Blob brush stroke commit: takes the user's stroke polyline, converts it
+   * to a closed polygon (brush footprint), and boolean-unions it with all
+   * existing shapes in the active sub-layer that share the same fill color.
+   * The resulting merged shape replaces those originals.
+   */
+  commitBlobStroke: (
+    subLayerId: string,
+    points: Vec2[],
+    fillColor: string,
+    radius: number,
+    strokeColor: string,
+    strokeWidth: number
+  ) => void;
+  /**
+   * Knife tool: subtracts the cut path (closed) from all shapes in the active
+   * sub-layer that intersect it. Each resulting piece becomes its own
+   * independent VectorShape (so the user can recolor or delete it separately).
+   */
+  cutShapesWithKnife: (subLayerId: string, cutPath: Vec2[]) => void;
+  /** Permanently remove a shape from a sub-layer's current frame state. */
+  deleteShape: (subLayerId: string, shapeId: string) => void;
+  /**
+   * Delete a single node (control point) from a shape's outline. The shape
+   * remains a closed polygon if it has ≥3 points after deletion; otherwise
+   * the shape itself is removed.
+   */
+  deleteNode: (subLayerId: string, shapeId: string, nodeIndex: number) => void;
+  /**
+   * Set the fill color of a single shape. Used to recolor cut pieces
+   * (e.g., darken a shirt fragment to make a precise shadow shape).
+   */
+  setShapeFillColor: (subLayerId: string, shapeId: string, color: string) => void;
+  /**
+   * Move a single node within a shape (used by the Node tool when dragging).
+   */
+  liveMoveNode: (
+    subLayerId: string,
+    shapeId: string,
+    nodeIndex: number,
+    target: Vec2
+  ) => void;
+  /**
+   * Promote a single shape from an in-between frame into its own
+   * keyframe shape, so node edits operate on a concrete shape. Returns
+   * nothing — the shape id is preserved.
+   */
   // Layer hierarchy ops
   addLayer: (name?: string) => void;
   addSubLayer: (layerId: string, name?: string) => void;
@@ -421,6 +494,318 @@ export const useRotoStore = create<RotoState>((set, get) => ({
         ...f,
         isKeyframe: true,
         states: { ...f.states, [subLayerId]: nextShapes },
+      };
+      return { project: { ...s.project, frames } };
+    }),
+
+  /**
+   * GLOBAL DEFORM: deform all shapes within the brush radius across ALL
+   * sub-layers of the given parent layer. Each affected frame is auto-
+   * promoted to a keyframe. The current frame's existing shape data is
+   * mutated in place; previously-interpolated shapes are seeded first.
+   */
+  liveDeformLayer: (layerId, brushArg) =>
+    set((s) => {
+      const layer = s.project.layers.find((l) => l.id === layerId);
+      if (!layer) return {};
+      const frames = s.project.frames.slice();
+      const idx = s.project.currentFrame;
+      const f = frames[idx];
+      if (!f) return {};
+      const r = brushArg.radius;
+      const r2 = r * r;
+      const strength = brushArg.strength;
+      const { lastMouse, delta } = brushArg;
+
+      // For each sub-layer in this parent layer, deform points in radius.
+      const nextStates: Record<string, VectorShape[]> = { ...f.states };
+      let changed = false;
+      for (const sub of layer.subLayers) {
+        if (!sub.visible || sub.locked) continue;
+        let existing = f.states[sub.id];
+        if (!existing || existing.length === 0) {
+          existing = getInterpolatedShapesForFrame(s.project, idx, sub.id);
+          if (existing.length === 0) continue;
+        }
+        let subChanged = false;
+        const nextShapes = existing.map((sh) => {
+          let shapeChanged = false;
+          const nextPoints = sh.points.map((pt) => {
+            const ddx = pt.x - lastMouse.x;
+            const ddy = pt.y - lastMouse.y;
+            const dist2val = ddx * ddx + ddy * ddy;
+            if (dist2val > r2) return pt;
+            const falloff = 1 - Math.sqrt(dist2val) / r;
+            shapeChanged = true;
+            return {
+              x: pt.x + delta.x * strength * falloff,
+              y: pt.y + delta.y * strength * falloff,
+            };
+          });
+          if (shapeChanged) {
+            subChanged = true;
+            return { ...sh, points: nextPoints };
+          }
+          return sh;
+        });
+        if (subChanged) {
+          changed = true;
+          nextStates[sub.id] = nextShapes;
+        }
+      }
+      if (!changed) return {};
+      frames[idx] = {
+        ...f,
+        isKeyframe: true,
+        states: nextStates,
+      };
+      return { project: { ...s.project, frames } };
+    }),
+
+  /**
+   * BLOB BRUSH STROKE COMMIT:
+   * 1. Convert stroke to a closed polygon (brush footprint).
+   * 2. Find existing shapes in the active sub-layer with the same fill color.
+   * 3. Boolean-union the new footprint with all those shapes.
+   * 4. Replace the originals with the resulting merged shape(s).
+   */
+  commitBlobStroke: (subLayerId, points, fillColor, radius, strokeColor, strokeWidth) =>
+    set((s) => {
+      const frames = s.project.frames.slice();
+      const idx = s.project.currentFrame;
+      const f = frames[idx];
+      if (!f) return {};
+      const newRing = strokeToPolygon(points, radius);
+      if (!newRing) return {};
+      // Hydrate from interpolation if this is an in-between.
+      let existing = f.states[subLayerId];
+      if (!existing || existing.length === 0) {
+        existing = getInterpolatedShapesForFrame(s.project, idx, subLayerId);
+      }
+      // Partition: same-color shapes (will be unioned with new stroke) and
+      // other-color shapes (preserved unchanged).
+      const sameColor: VectorShape[] = [];
+      const other: VectorShape[] = [];
+      for (const sh of existing) {
+        if (sh.fill.color.toLowerCase() === fillColor.toLowerCase() && sh.fill.closed) {
+          sameColor.push(sh);
+        } else {
+          other.push(sh);
+        }
+      }
+      // Build rings to union: new stroke + each same-color shape's outer ring.
+      const rings: number[][][] = [newRing];
+      for (const sh of sameColor) {
+        const r = shapeToRing(sh);
+        if (r) rings.push(r);
+      }
+      const multi = booleanUnion(rings);
+      const merged = multiPolygonToShapes(multi, {
+        stroke: {
+          color: strokeColor,
+          width: strokeWidth,
+          jitter: 0,
+          variance: 0,
+        },
+        fill: { enabled: true, color: fillColor, closed: true },
+      });
+      // Final state: other shapes + merged shapes.
+      frames[idx] = {
+        ...f,
+        isKeyframe: true,
+        states: {
+          ...f.states,
+          [subLayerId]: [...other, ...merged],
+        },
+      };
+      return { project: { ...s.project, frames } };
+    }),
+
+  /**
+   * KNIFE TOOL:
+   * 1. Close the cut path if it has ≥2 points.
+   * 2. Convert the cut path to a thin polygon "ribbon" (with a small thickness
+   *    perpendicular to the path direction) so the boolean subtraction has
+   *    an actual area to subtract — a perfectly straight line has zero area
+   *    and can't cut anything.
+   * 3. For each closed shape in the sub-layer, subtract the cut ribbon.
+   * 4. The remaining pieces become independent VectorShape objects.
+   * The result REPLACES all the original shapes that were cut.
+   */
+  cutShapesWithKnife: (subLayerId, cutPath) =>
+    set((s) => {
+      const frames = s.project.frames.slice();
+      const idx = s.project.currentFrame;
+      const f = frames[idx];
+      if (!f) return {};
+      if (cutPath.length < 2) return {};
+      // Convert the cut path to a thin "ribbon" polygon with a small
+      // perpendicular thickness. A 1.5px half-width gives a 3px-wide cut
+      // channel which is enough for the boolean engine to register.
+      const halfWidth = 1.5;
+      const leftPts: number[][] = [];
+      const rightPts: number[][] = [];
+      for (let i = 0; i < cutPath.length; i++) {
+        const prev = cutPath[Math.max(0, i - 1)];
+        const next = cutPath[Math.min(cutPath.length - 1, i + 1)];
+        let tx = next.x - prev.x;
+        let ty = next.y - prev.y;
+        const len = Math.hypot(tx, ty) || 1;
+        tx /= len;
+        ty /= len;
+        // Normal: (-ty, tx)
+        leftPts.push([cutPath[i].x - ty * halfWidth, cutPath[i].y + tx * halfWidth]);
+        rightPts.push([cutPath[i].x + ty * halfWidth, cutPath[i].y - tx * halfWidth]);
+      }
+      // Build the cut ring: left points forward, then right points reversed,
+      // then close back to the first left point.
+      const cutRing: number[][] = [];
+      for (const p of leftPts) cutRing.push([p[0], p[1]]);
+      for (let i = rightPts.length - 1; i >= 0; i--) cutRing.push([rightPts[i][0], rightPts[i][1]]);
+      cutRing.push([leftPts[0][0], leftPts[0][1]]);
+
+      // Hydrate from interpolation if needed.
+      let existing = f.states[subLayerId];
+      if (!existing || existing.length === 0) {
+        existing = getInterpolatedShapesForFrame(s.project, idx, subLayerId);
+        if (existing.length === 0) return {};
+      }
+      const out: VectorShape[] = [];
+      let anyCut = false;
+      for (const sh of existing) {
+        if (!sh.fill.closed) {
+          out.push(sh);
+          continue;
+        }
+        const ring = shapeToRing(sh);
+        if (!ring) {
+          out.push(sh);
+          continue;
+        }
+        const result = booleanSubtract(ring, [cutRing]);
+        if (result.length === 1 && result[0].length === 1) {
+          // No cut happened — keep original.
+          out.push(sh);
+        } else {
+          anyCut = true;
+          const pieces = multiPolygonToShapes(result, {
+            stroke: sh.stroke,
+            fill: sh.fill,
+          });
+          out.push(...pieces);
+        }
+      }
+      if (!anyCut) return {};
+      frames[idx] = {
+        ...f,
+        isKeyframe: true,
+        states: { ...f.states, [subLayerId]: out },
+      };
+      return { project: { ...s.project, frames } };
+    }),
+
+  deleteShape: (subLayerId, shapeId) =>
+    set((s) => {
+      const frames = s.project.frames.slice();
+      const idx = s.project.currentFrame;
+      const f = frames[idx];
+      if (!f) return {};
+      let existing = f.states[subLayerId];
+      if (!existing || existing.length === 0) {
+        existing = getInterpolatedShapesForFrame(s.project, idx, subLayerId);
+        if (existing.length === 0) return {};
+      }
+      const next = existing.filter((sh) => sh.id !== shapeId);
+      frames[idx] = {
+        ...f,
+        isKeyframe: true,
+        states: { ...f.states, [subLayerId]: next },
+      };
+      return {
+        project: { ...s.project, frames },
+        selectedShapeIds: s.selectedShapeIds.filter((id) => id !== shapeId),
+      };
+    }),
+
+  deleteNode: (subLayerId, shapeId, nodeIndex) =>
+    set((s) => {
+      const frames = s.project.frames.slice();
+      const idx = s.project.currentFrame;
+      const f = frames[idx];
+      if (!f) return {};
+      let existing = f.states[subLayerId];
+      if (!existing || existing.length === 0) {
+        existing = getInterpolatedShapesForFrame(s.project, idx, subLayerId);
+        if (existing.length === 0) return {};
+      }
+      const next = existing
+        .map((sh) => {
+          if (sh.id !== shapeId) return sh;
+          if (nodeIndex < 0 || nodeIndex >= sh.points.length) return sh;
+          const newPoints = sh.points
+            .slice(0, nodeIndex)
+            .concat(sh.points.slice(nodeIndex + 1));
+          if (newPoints.length < 3) {
+            // Shape becomes degenerate — drop it.
+            return null;
+          }
+          return { ...sh, points: newPoints };
+        })
+        .filter((sh): sh is VectorShape => sh !== null);
+      frames[idx] = {
+        ...f,
+        isKeyframe: true,
+        states: { ...f.states, [subLayerId]: next },
+      };
+      return { project: { ...s.project, frames } };
+    }),
+
+  setShapeFillColor: (subLayerId, shapeId, color) =>
+    set((s) => {
+      const frames = s.project.frames.slice();
+      const idx = s.project.currentFrame;
+      const f = frames[idx];
+      if (!f) return {};
+      let existing = f.states[subLayerId];
+      if (!existing || existing.length === 0) {
+        existing = getInterpolatedShapesForFrame(s.project, idx, subLayerId);
+        if (existing.length === 0) return {};
+      }
+      const next = existing.map((sh) =>
+        sh.id === shapeId
+          ? { ...sh, fill: { ...sh.fill, color, enabled: true } }
+          : sh
+      );
+      frames[idx] = {
+        ...f,
+        isKeyframe: true,
+        states: { ...f.states, [subLayerId]: next },
+      };
+      return { project: { ...s.project, frames } };
+    }),
+
+  liveMoveNode: (subLayerId, shapeId, nodeIndex, target) =>
+    set((s) => {
+      const frames = s.project.frames.slice();
+      const idx = s.project.currentFrame;
+      const f = frames[idx];
+      if (!f) return {};
+      let existing = f.states[subLayerId];
+      if (!existing || existing.length === 0) {
+        existing = getInterpolatedShapesForFrame(s.project, idx, subLayerId);
+        if (existing.length === 0) return {};
+      }
+      const next = existing.map((sh) => {
+        if (sh.id !== shapeId) return sh;
+        if (nodeIndex < 0 || nodeIndex >= sh.points.length) return sh;
+        const newPoints = sh.points.slice();
+        newPoints[nodeIndex] = target;
+        return { ...sh, points: newPoints };
+      });
+      frames[idx] = {
+        ...f,
+        isKeyframe: true,
+        states: { ...f.states, [subLayerId]: next },
       };
       return { project: { ...s.project, frames } };
     }),

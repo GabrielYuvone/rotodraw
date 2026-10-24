@@ -100,7 +100,10 @@ export interface ResolutionConfig {
 }
 
 /** Tool modes for the unified multi-purpose brush. */
-export type ToolMode = "draw" | "deform" | "select";
+export type ToolMode = "draw" | "blob" | "deform" | "knife" | "node" | "select";
+
+/** Deformation brush scope: which sub-layers a deform brush stroke affects. */
+export type DeformScope = "local" | "global";
 
 /** Top-level project state (serializable to JSON for save/load). */
 export interface RotoProject {
@@ -132,6 +135,8 @@ export interface BrushConfig {
   deformRadius: number;
   /** Deform strength 0..1 (push = +, pull = −). */
   deformStrength: number;
+  /** Deform scope — local = only active sub-layer; global = entire parent layer. */
+  deformScope: DeformScope;
   /** Drawing stroke width. */
   drawStrokeWidth: number;
   /** Drawing stroke jitter (line boil amount). */
@@ -142,4 +147,10 @@ export interface BrushConfig {
   fillColor: string;
   /** Whether new strokes auto-close for fills. */
   autoClose: boolean;
+  /** Blob brush radius (used by Blob tool — the resulting union shape's outline). */
+  blobBrushRadius: number;
+  /** Knife tool auto-closes the cut path before subtraction. */
+  knifeAutoClose: boolean;
+  /** Node tool: snap radius in canvas-space px for selecting a node. */
+  nodeSnapRadius: number;
 }

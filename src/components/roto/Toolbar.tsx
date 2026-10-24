@@ -4,15 +4,16 @@ import {
   Pen,
   Spline,
   MousePointer2,
-  Eye,
-  Layers,
   Save,
   FolderOpen,
   Film,
   Plus,
-  Undo2,
-  Redo2,
   Settings2,
+  CircleDot,
+  Scissors,
+  Spline as SplineIcon,
+  Globe,
+  Crosshair,
 } from "lucide-react";
 import { useRef } from "react";
 import { Button } from "@/components/ui/button";
@@ -31,7 +32,7 @@ import {
   ToggleGroupItem,
 } from "@/components/ui/toggle-group";
 import { useRotoStore } from "@/lib/roto/store";
-import type { ToolMode } from "@/lib/roto/types";
+import type { ToolMode, DeformScope } from "@/lib/roto/types";
 
 interface Props {
   onNewProject: () => void;
@@ -44,9 +45,7 @@ export function Toolbar({ onNewProject }: Props) {
   const setBrush = useRotoStore((s) => s.setBrush);
   const setProjectName = useRotoStore((s) => s.setProjectName);
   const loadProject = useRotoStore((s) => s.loadProject);
-  const resetProject = useRotoStore((s) => s.resetProject);
 
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleExport = () => {
@@ -98,9 +97,12 @@ export function Toolbar({ onNewProject }: Props) {
           }}
           className="gap-1"
         >
-          <ToolToggle value="draw" label="Draw Brush" icon={<Pen className="h-4 w-4" />} />
-          <ToolToggle value="deform" label="Deform / Liquify" icon={<Spline className="h-4 w-4" />} />
-          <ToolToggle value="select" label="Select / Move" icon={<MousePointer2 className="h-4 w-4" />} />
+          <ToolToggle value="draw" label="Draw Brush — vector stroke with black outline" icon={<Pen className="h-4 w-4" />} />
+          <ToolToggle value="blob" label="Blob Brush — boolean union of same-color strokes" icon={<CircleDot className="h-4 w-4" />} />
+          <ToolToggle value="deform" label="Deform / Liquify — proportional push/pull" icon={<Spline className="h-4 w-4" />} />
+          <ToolToggle value="knife" label="Knife — slice closed shapes into pieces" icon={<Scissors className="h-4 w-4" />} />
+          <ToolToggle value="node" label="Node — edit control points / delete fragments" icon={<SplineIcon className="h-4 w-4" />} />
+          <ToolToggle value="select" label="Select / Move — transform whole shapes" icon={<MousePointer2 className="h-4 w-4" />} />
         </ToggleGroup>
 
         <Separator orientation="vertical" className="h-6" />
@@ -157,6 +159,43 @@ export function Toolbar({ onNewProject }: Props) {
           </div>
         )}
 
+        {brush.mode === "blob" && (
+          <div className="flex items-center gap-3 flex-wrap">
+            <SliderSetting
+              label="Brush radius"
+              icon={<CircleDot className="h-3 w-3" />}
+              value={brush.blobBrushRadius}
+              min={4}
+              max={80}
+              step={1}
+              onChange={(v) => setBrush({ blobBrushRadius: v })}
+              unit="px"
+            />
+            <label className="flex items-center gap-1.5 text-xs">
+              <span>Fill</span>
+              <input
+                type="color"
+                value={brush.fillColor}
+                onChange={(e) => setBrush({ fillColor: e.target.value })}
+                className="h-6 w-8 rounded border border-input bg-background cursor-pointer"
+              />
+            </label>
+            <SliderSetting
+              label="Outline"
+              icon={<Pen className="h-3 w-3" />}
+              value={brush.drawStrokeWidth}
+              min={1}
+              max={10}
+              step={0.5}
+              onChange={(v) => setBrush({ drawStrokeWidth: v })}
+              unit="px"
+            />
+            <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-muted/50">
+              Same-color strokes auto-merge into one solid fill block
+            </span>
+          </div>
+        )}
+
         {brush.mode === "deform" && (
           <div className="flex items-center gap-3 flex-wrap">
             <SliderSetting
@@ -177,8 +216,64 @@ export function Toolbar({ onNewProject }: Props) {
               onChange={(v) => setBrush({ deformStrength: v })}
               format={(v) => `${Math.round(v * 100)}%`}
             />
+            {/* Deform scope toggle: local (single sub-layer) vs global (entire parent layer) */}
+            <div className="flex items-center gap-1 rounded-md border border-input p-0.5">
+              <ScopeToggle
+                active={brush.deformScope === "local"}
+                onClick={() => setBrush({ deformScope: "local" })}
+                label="Local"
+                hint="Deform only the sub-layer under cursor"
+                icon={<Crosshair className="h-3.5 w-3.5" />}
+              />
+              <ScopeToggle
+                active={brush.deformScope === "global"}
+                onClick={() => setBrush({ deformScope: "global" })}
+                label="Global"
+                hint="Deform entire parent layer (e.g., Cara + all sub-layers)"
+                icon={<Globe className="h-3.5 w-3.5" />}
+              />
+            </div>
             <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-muted/50">
               Scroll on canvas to adjust radius
+            </span>
+          </div>
+        )}
+
+        {brush.mode === "knife" && (
+          <div className="flex items-center gap-3 flex-wrap">
+            <label className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={brush.knifeAutoClose}
+                onChange={(e) =>
+                  setBrush({ knifeAutoClose: e.target.checked })
+                }
+                className="rounded"
+              />
+              <span>Auto-close cut path</span>
+            </label>
+            <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-muted/50">
+              Draw across a closed shape to slice it. Each piece becomes
+              independent — switch to Node tool to recolor / delete.
+            </span>
+          </div>
+        )}
+
+        {brush.mode === "node" && (
+          <div className="flex items-center gap-3 flex-wrap">
+            <SliderSetting
+              label="Snap radius"
+              icon={<Crosshair className="h-3 w-3" />}
+              value={brush.nodeSnapRadius}
+              min={4}
+              max={40}
+              step={1}
+              onChange={(v) => setBrush({ nodeSnapRadius: v })}
+              unit="px"
+            />
+            <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-muted/50">
+              Click a shape to reveal its nodes · drag to move · Delete to
+              remove node or shape
             </span>
           </div>
         )}
@@ -186,7 +281,8 @@ export function Toolbar({ onNewProject }: Props) {
         {brush.mode === "select" && (
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-muted/50">
-              Drag = move · Shift-drag = scale · Alt-drag = rotate · Drag empty = marquee
+              Drag = move · Shift-drag = scale · Alt-drag = rotate · Drag empty =
+              marquee
             </span>
           </div>
         )}
@@ -208,7 +304,10 @@ export function Toolbar({ onNewProject }: Props) {
           <TooltipButton label="New project" onClick={() => onNewProject()}>
             <Plus className="h-4 w-4" />
           </TooltipButton>
-          <TooltipButton label="Import project JSON" onClick={() => importInputRef.current?.click()}>
+          <TooltipButton
+            label="Import project JSON"
+            onClick={() => importInputRef.current?.click()}
+          >
             <FolderOpen className="h-4 w-4" />
           </TooltipButton>
           <TooltipButton label="Export project JSON" onClick={handleExport}>
@@ -217,6 +316,40 @@ export function Toolbar({ onNewProject }: Props) {
         </div>
       </div>
     </TooltipProvider>
+  );
+}
+
+function ScopeToggle({
+  active,
+  onClick,
+  label,
+  hint,
+  icon,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  hint: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          onClick={onClick}
+          className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors
+            ${
+              active
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground"
+            }`}
+        >
+          {icon}
+          {label}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{hint}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -240,7 +373,7 @@ function ToolToggle({
           {icon}
         </ToggleGroupItem>
       </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
+      <TooltipContent side="bottom">{label}</TooltipContent>
     </Tooltip>
   );
 }
