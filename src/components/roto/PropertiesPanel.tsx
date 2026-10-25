@@ -396,7 +396,10 @@ export function PropertiesPanel() {
               <li><strong>Deform (Global)</strong>: push the entire parent layer (eyes + mouth + outlines) together.</li>
               <li>Hold <kbd>Shift</kbd> while dragging in Select mode to scale; <kbd>Alt</kbd> to rotate.</li>
               <li><kbd>Scroll wheel</kbd> zooms in/out at the cursor · <kbd>Z</kbd> + drag pans · release Z to return to your tool · <kbd>0</kbd> resets the view.</li>
+              <li><kbd>Space</kbd> + drag also pans; a quick <kbd>Space</kbd> tap toggles play/pause.</li>
               <li>Use <kbd>[</kbd> / <kbd>]</kbd> to adjust the Deform / Blob brush radius (the wheel is reserved for zoom).</li>
+              <li><strong>Smoothing</strong>: in Draw / Blob mode, raise the Smoothing slider (0–5) for cleaner, more elegant curves from raw hand input.</li>
+              <li><strong>Deform</strong>: drag with the brush to nudge points toward where you started — points follow the cursor proportional to strength × falloff, with no compounding.</li>
             </ul>
           </section>
         </div>

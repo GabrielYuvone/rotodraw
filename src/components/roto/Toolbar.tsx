@@ -127,6 +127,18 @@ export function Toolbar({ onNewProject }: Props) {
               unit="px"
             />
             <SliderSetting
+              label="Smoothing"
+              icon={<SplineIcon className="h-3 w-3" />}
+              value={brush.drawSmoothing}
+              min={0}
+              max={5}
+              step={1}
+              onChange={(v) => setBrush({ drawSmoothing: v })}
+              format={(v) =>
+                v === 0 ? "Off" : ["Low", "Med", "High", "More", "Max"][v - 1]
+              }
+            />
+            <SliderSetting
               label="Line Boil"
               value={brush.drawStrokeJitter}
               min={0}
@@ -176,6 +188,18 @@ export function Toolbar({ onNewProject }: Props) {
               step={1}
               onChange={(v) => setBrush({ blobBrushRadius: v })}
               unit="px"
+            />
+            <SliderSetting
+              label="Smoothing"
+              icon={<SplineIcon className="h-3 w-3" />}
+              value={brush.blobSmoothing}
+              min={0}
+              max={5}
+              step={1}
+              onChange={(v) => setBrush({ blobSmoothing: v })}
+              format={(v) =>
+                v === 0 ? "Off" : ["Low", "Med", "High", "More", "Max"][v - 1]
+              }
             />
             <label className="flex items-center gap-1.5 text-xs">
               <span>Fill</span>

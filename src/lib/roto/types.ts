@@ -159,12 +159,24 @@ export interface BrushConfig {
   drawStrokeJitter: number;
   /** Drawing stroke variance. */
   drawStrokeVariance: number;
+  /**
+   * Drawing smoothing level (0..5). 0 = no smoothing (raw points as drawn),
+   * 5 = heavy smoothing (Catmull-Rom + Chaikin iterations). Higher levels
+   * produce smoother, more elegant curves at the cost of less precise
+   * control over individual anchor points.
+   */
+  drawSmoothing: number;
   /** Default fill color for new draw strokes. */
   fillColor: string;
   /** Whether new strokes auto-close for fills. */
   autoClose: boolean;
   /** Blob brush radius (used by Blob tool — the resulting union shape's outline). */
   blobBrushRadius: number;
+  /**
+   * Blob brush smoothing level (0..5). Same as `drawSmoothing` but applied
+   * to the blob stroke's polygon before boolean union.
+   */
+  blobSmoothing: number;
   /** Knife tool auto-closes the cut path before subtraction. */
   knifeAutoClose: boolean;
   /** Node tool: snap radius in canvas-space px for selecting a node. */

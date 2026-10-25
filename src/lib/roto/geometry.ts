@@ -245,6 +245,98 @@ export function uid(prefix = "id"): string {
 }
 
 // ============================================================
+// Stroke smoothing
+// Used by the Draw and Blob brush tools to produce cleaner, more
+// organic strokes from raw mouse/stylus input. Implements two
+// complementary smoothing strategies:
+//
+//  1. Distance-based point reduction (Simplify): remove points
+//     closer than `tolerance` to their predecessor. This cleans
+//     up tiny jitter from hand tremor.
+//  2. Chaikin's corner-cutting algorithm (Smooth): iteratively
+//     replace each segment with two new points at 25% and 75%
+//     along the segment. Each iteration roughly doubles the
+//     point count and halves the high-frequency noise.
+//
+// The `drawSmoothing` setting (0..5) controls how many Chaikin
+// iterations to apply. Level 0 keeps the raw input; level 5
+// produces very smooth, slightly loose curves.
+// ============================================================
+
+/**
+ * Chaikin's corner-cutting smoothing for an open or closed polyline.
+ * Returns a new array of points; does not mutate the input.
+ *
+ * @param points Input polyline.
+ * @param iterations Number of Chaikin iterations to apply.
+ * @param closed If true, the polyline is treated as closed (the
+ *               last segment connects back to the first).
+ */
+export function chaikinSmooth(
+  points: Vec2[],
+  iterations: number,
+  closed: boolean
+): Vec2[] {
+  if (iterations <= 0 || points.length < 3) return points.slice();
+  let pts = points.slice();
+  for (let it = 0; it < iterations; it++) {
+    const out: Vec2[] = [];
+    const n = pts.length;
+    if (closed) {
+      // For a closed polyline, smooth across the seam too.
+      for (let i = 0; i < n; i++) {
+        const cur = pts[i];
+        const next = pts[(i + 1) % n];
+        out.push({
+          x: 0.75 * cur.x + 0.25 * next.x,
+          y: 0.75 * cur.y + 0.25 * next.y,
+        });
+        out.push({
+          x: 0.25 * cur.x + 0.75 * next.x,
+          y: 0.25 * cur.y + 0.75 * next.y,
+        });
+      }
+    } else {
+      // For an open polyline, keep the endpoints fixed.
+      out.push(pts[0]);
+      for (let i = 0; i < n - 1; i++) {
+        const cur = pts[i];
+        const next = pts[i + 1];
+        out.push({
+          x: 0.75 * cur.x + 0.25 * next.x,
+          y: 0.75 * cur.y + 0.25 * next.y,
+        });
+        out.push({
+          x: 0.25 * cur.x + 0.75 * next.x,
+          y: 0.25 * cur.y + 0.75 * next.y,
+        });
+      }
+      out.push(pts[n - 1]);
+    }
+    pts = out;
+  }
+  return pts;
+}
+
+/**
+ * Apply the user's selected smoothing level to a stroke.
+ *
+ * @param points Raw stroke points (already simplified by `simplifyPoints`).
+ * @param level Smoothing level 0..5.
+ * @param closed If true, smooth as a closed polyline.
+ */
+export function applySmoothingLevel(
+  points: Vec2[],
+  level: number,
+  closed: boolean
+): Vec2[] {
+  if (level <= 0 || points.length < 3) return points.slice();
+  // Level N → N Chaikin iterations. Each iteration roughly halves
+  // high-frequency jitter while preserving the overall shape.
+  return chaikinSmooth(points, Math.min(5, Math.max(1, level)), closed);
+}
+
+// ============================================================
 // Polygon Boolean Utilities
 // Used by the Blob Brush (boolean union of strokes), the Knife
 // tool (boolean subtraction to slice shapes), and the global

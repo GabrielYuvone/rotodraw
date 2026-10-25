@@ -5,6 +5,7 @@ import { useRotoStore, getInterpolatedShapesForFrame } from "@/lib/roto/store";
 import type { Vec2, VectorShape, Layer, SubLayer, ToolMode } from "@/lib/roto/types";
 import {
   applyLineBoil,
+  applySmoothingLevel,
   distanceToShape,
   nearestNode,
   pointInPolygon,
@@ -48,6 +49,7 @@ export function RotoCanvas({ videoRef }: Props) {
   const enterPanMode = useRotoStore((s) => s.enterPanMode);
   const exitPanMode = useRotoStore((s) => s.exitPanMode);
   const panModePreviousTool = useRotoStore((s) => s.panModePreviousTool);
+  const panModeSource = useRotoStore((s) => s.panModeSource);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -70,6 +72,16 @@ export function RotoCanvas({ videoRef }: Props) {
         shapeId: string;          // local mode only
         startMouse: Vec2;
         lastMouse: Vec2;
+        /**
+         * Snapshot of the shape(s)' points taken at mousedown. We deform
+         * RELATIVE TO this snapshot, not incrementally — this makes the
+         * deform track the cursor 1:1 (× strength × falloff) instead of
+         * accumulating small deltas (which felt "exaggerated" because the
+         * same drag distance was being applied to already-moved points).
+         * For global scope, this is a map of subLayerId → array of
+         * { shapeId, points }.
+         */
+        initialShapes: { subLayerId: string; shapeId: string; points: Vec2[] }[];
       }
     | null
   >(null);
@@ -91,12 +103,19 @@ export function RotoCanvas({ videoRef }: Props) {
     shapeId: string;
     nodeIndex: number;
   } | null>(null);
-  // Pan-mode drag state: when Z is held, drag pans the canvas. Stores the
-  // last cursor position so we can compute the delta on each mousemove.
+  // Pan-mode drag state: when Z or Space is held, drag pans the canvas. Stores
+  // the last cursor position so we can compute the delta on each mousemove.
   const panDragRef = useRef<{
     lastClientX: number;
     lastClientY: number;
   } | null>(null);
+  // Space-tap vs hold+drag detection: when Space is pressed we record the
+  // timestamp. The canvas's mousedown handler (when in space pan mode) sets
+  // `spaceDragOccurredRef` to true. On keyup, if no drag occurred AND the
+  // press was short (< 350 ms), we treat it as a TAP and toggle play/pause.
+  const spacePressedAtRef = useRef<number>(0);
+  const spaceDragOccurredRef = useRef<boolean>(false);
+  const SPACE_TAP_MAX_MS = 350;
 
   // ----- Clear node selection whenever the tool changes -----
   useEffect(() => {
@@ -247,11 +266,16 @@ export function RotoCanvas({ videoRef }: Props) {
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button === 2) return; // right-click ignored
-      // If we're in temporary pan mode (Z held), start a pan drag instead of
-      // any tool action. Middle-mouse button also pans (a common convention
-      // in graphics editors).
+      // If we're in temporary pan mode (Z or Space held), start a pan drag
+      // instead of any tool action. Middle-mouse button also pans (a common
+      // convention in graphics editors).
       if (panModePreviousTool !== null || e.button === 1) {
         panDragRef.current = { lastClientX: e.clientX, lastClientY: e.clientY };
+        // If we're panning via Space, mark that a drag occurred so the
+        // subsequent keyup doesn't trigger a play/pause tap.
+        if (panModeSource === "space") {
+          spaceDragOccurredRef.current = true;
+        }
         e.preventDefault();
         return;
       }
@@ -280,6 +304,24 @@ export function RotoCanvas({ videoRef }: Props) {
             }
           }
           if (!activeLayer) return;
+          // Snapshot all visible/unlocked sub-layers' shape points so we can
+          // deform relative to the initial position (no compounding).
+          const initialShapes: { subLayerId: string; shapeId: string; points: Vec2[] }[] = [];
+          for (const sub of activeLayer.subLayers) {
+            if (!sub.visible || sub.locked) continue;
+            const shapes = getInterpolatedShapesForFrame(
+              project,
+              project.currentFrame,
+              sub.id
+            );
+            for (const sh of shapes) {
+              initialShapes.push({
+                subLayerId: sub.id,
+                shapeId: sh.id,
+                points: sh.points.map((p2) => ({ x: p2.x, y: p2.y })),
+              });
+            }
+          }
           deformingRef.current = {
             scope: "global",
             subLayerId: activeSubLayerId ?? "",
@@ -287,10 +329,12 @@ export function RotoCanvas({ videoRef }: Props) {
             shapeId: "",
             startMouse: p,
             lastMouse: p,
+            initialShapes,
           };
         } else {
           const hit = findShapeAt(p);
           if (!hit) return;
+          // Snapshot the shape's points.
           deformingRef.current = {
             scope: "local",
             subLayerId: hit.subLayer.id,
@@ -298,6 +342,13 @@ export function RotoCanvas({ videoRef }: Props) {
             shapeId: hit.shape.id,
             startMouse: p,
             lastMouse: p,
+            initialShapes: [
+              {
+                subLayerId: hit.subLayer.id,
+                shapeId: hit.shape.id,
+                points: hit.shape.points.map((p2) => ({ x: p2.x, y: p2.y })),
+              },
+            ],
           };
         }
       } else if (mode === "node") {
@@ -378,6 +429,7 @@ export function RotoCanvas({ videoRef }: Props) {
       clearSelection,
       toCanvasCoords,
       panModePreviousTool,
+      panModeSource,
     ]
   );
 
@@ -407,37 +459,61 @@ export function RotoCanvas({ videoRef }: Props) {
         return;
       }
 
-      // Deforming — push/pull points within radius around cursor
+      // Deforming — push/pull points within brush radius.
+      // We deform relative to the snapshot taken at mousedown (`d.startMouse`
+      // and `d.initialShapes`), NOT incrementally. This makes the deform
+      // track the cursor 1:1 (× strength × falloff): points near where you
+      // started dragging follow the cursor proportionally to the strength,
+      // points at the brush edge don't move. The previous incremental approach
+      // made the shape drift in surprising directions because the falloff was
+      // re-computed each frame against the already-moved points.
       if (deformingRef.current) {
         const d = deformingRef.current;
-        const dx = p.x - d.lastMouse.x;
-        const dy = p.y - d.lastMouse.y;
+        // Total cursor displacement since mousedown.
+        const totalDx = p.x - d.startMouse.x;
+        const totalDy = p.y - d.startMouse.y;
         const r = brush.deformRadius;
         const strength = brush.deformStrength;
         if (d.scope === "global") {
-          // Global deform: deform all sub-layers in the parent layer within radius.
-          liveDeformLayer(d.layerId, {
-            lastMouse: d.lastMouse,
-            delta: { x: dx, y: dy },
-            radius: r,
-            strength,
-          });
+          // Global deform: deform every shape in the parent layer whose
+          // INITIAL position was within the brush radius of startMouse.
+          for (const init of d.initialShapes) {
+            liveDeformShape(
+              init.subLayerId,
+              init.shapeId,
+              () =>
+                init.points.map((pt) => {
+                  const ddx = pt.x - d.startMouse.x;
+                  const ddy = pt.y - d.startMouse.y;
+                  const dist2val = ddx * ddx + ddy * ddy;
+                  if (dist2val > r * r) return pt;
+                  // Linear falloff: 1 at cursor start, 0 at brush edge.
+                  const falloff = 1 - Math.sqrt(dist2val) / r;
+                  return {
+                    x: pt.x + totalDx * strength * falloff,
+                    y: pt.y + totalDy * strength * falloff,
+                  };
+                })
+            );
+          }
         } else {
-          // Local deform: deform only the specific shape under cursor.
-          liveDeformShape(d.subLayerId, d.shapeId, (pts) =>
-            pts.map((pt) => {
-              const ddx = pt.x - d.lastMouse.x;
-              const ddy = pt.y - d.lastMouse.y;
-              const dist2val = ddx * ddx + ddy * ddy;
-              if (dist2val > r * r) return pt;
-              // Falloff: linear with distance, 1 at center, 0 at radius
-              const falloff = 1 - Math.sqrt(dist2val) / r;
-              return {
-                x: pt.x + dx * strength * falloff,
-                y: pt.y + dy * strength * falloff,
-              };
-            })
-          );
+          // Local deform: deform only the shape under cursor.
+          const init = d.initialShapes[0];
+          if (init) {
+            liveDeformShape(d.subLayerId, d.shapeId, () =>
+              init.points.map((pt) => {
+                const ddx = pt.x - d.startMouse.x;
+                const ddy = pt.y - d.startMouse.y;
+                const dist2val = ddx * ddx + ddy * ddy;
+                if (dist2val > r * r) return pt;
+                const falloff = 1 - Math.sqrt(dist2val) / r;
+                return {
+                  x: pt.x + totalDx * strength * falloff,
+                  y: pt.y + totalDy * strength * falloff,
+                };
+              })
+            );
+          }
         }
         d.lastMouse = p;
         return;
@@ -517,9 +593,16 @@ export function RotoCanvas({ videoRef }: Props) {
     // Finalize drawing — draw / blob / knife all use drawingRef
     if (drawingRef.current) {
       const d = drawingRef.current;
-      const pts = simplifyPoints(d.points, 2);
+      // First pass: simplify (drop near-duplicate points from hand tremor).
+      let pts = simplifyPoints(d.points, 2);
       const mode = brush.mode;
       if (mode === "blob" && pts.length >= 1) {
+        // Apply smoothing to the stroke before converting to a polygon.
+        // For blob strokes we smooth as a CLOSED polyline so the start/end
+        // join cleanly when the polygon is closed.
+        if (brush.blobSmoothing > 0 && pts.length >= 3) {
+          pts = applySmoothingLevel(pts, brush.blobSmoothing, true);
+        }
         // Blob brush: convert stroke to polygon footprint and boolean-union
         // with existing same-color shapes in this sub-layer.
         commitBlobStroke(
@@ -531,10 +614,14 @@ export function RotoCanvas({ videoRef }: Props) {
           brush.drawStrokeWidth
         );
       } else if (mode === "knife" && pts.length >= 2) {
-        // Knife tool: subtract the cut path from all closed shapes in the
-        // active sub-layer. Each resulting piece becomes its own shape.
+        // Knife cuts don't benefit from smoothing — keep raw points.
         cutShapesWithKnife(d.subLayerId, pts);
       } else if (mode === "draw" && pts.length >= 2) {
+        // Apply smoothing for the Draw tool. For an open stroke we keep
+        // the endpoints fixed (the cursor's start and end positions).
+        if (brush.drawSmoothing > 0 && pts.length >= 3) {
+          pts = applySmoothingLevel(pts, brush.drawSmoothing, brush.autoClose);
+        }
         const newShape: VectorShape = {
           id: uid("shape"),
           points: pts,
@@ -761,7 +848,16 @@ export function RotoCanvas({ videoRef }: Props) {
       }
       // "Z" key — temporarily enter pan mode (don't repeat-fire on hold).
       if ((e.key === "z" || e.key === "Z") && !e.repeat) {
-        enterPanMode();
+        enterPanMode("z");
+        e.preventDefault();
+        return;
+      }
+      // " " (Space) — temporarily enter pan mode. A SHORT tap without a
+      // drag toggles play/pause on release (handled in onKeyUp).
+      if (e.key === " " && !e.repeat) {
+        spacePressedAtRef.current = performance.now();
+        spaceDragOccurredRef.current = false;
+        enterPanMode("space");
         e.preventDefault();
         return;
       }
@@ -813,6 +909,25 @@ export function RotoCanvas({ videoRef }: Props) {
         exitPanMode();
         // Also terminate any in-progress pan drag.
         panDragRef.current = null;
+        return;
+      }
+      if (e.key === " ") {
+        const wasTap =
+          !spaceDragOccurredRef.current &&
+          performance.now() - spacePressedAtRef.current < SPACE_TAP_MAX_MS;
+        exitPanMode();
+        panDragRef.current = null;
+        if (wasTap) {
+          // Space TAP — toggle play/pause by clicking the Timeline's
+          // Play/Pause button. The button is identified by its aria-label
+          // ("Play" or "Pause" depending on the current state).
+          const btn = Array.from(
+            document.querySelectorAll(
+              'button[aria-label="Play"], button[aria-label="Pause"]'
+            )
+          )[0] as HTMLButtonElement | undefined;
+          if (btn) btn.click();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);

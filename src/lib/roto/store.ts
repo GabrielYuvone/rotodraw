@@ -113,9 +113,11 @@ function makeDefaultBrush(): BrushConfig {
     drawStrokeWidth: 3,
     drawStrokeJitter: 0.4,
     drawStrokeVariance: 0.2,
+    drawSmoothing: 2,
     fillColor: "#3b6fb5",
     autoClose: true,
     blobBrushRadius: 18,
+    blobSmoothing: 2,
     knifeAutoClose: true,
     nodeSnapRadius: 12,
   };
@@ -161,11 +163,17 @@ interface RotoState {
     panY: number;
   };
   /**
-   * When the user holds Z to temporarily pan, we remember the previously
-   * active tool here so we can restore it on release. Null when no temporary
-   * switch is active.
+   * When the user holds Z or Space to temporarily pan, we remember the
+   * previously active tool here so we can restore it on release. Null when
+   * no temporary switch is active.
    */
   panModePreviousTool: ToolMode | null;
+  /**
+   * Which key initiated the current temporary pan mode: "z", "space", or
+   * null. We track this so we can distinguish a Space TAP (which toggles
+   * play/pause) from a Space HOLD+drag (which pans).
+   */
+  panModeSource: "z" | "space" | null;
 
   // ---- Actions ----
   setVideo: (url: string, resolution: ResolutionConfig, frameCount: number) => void;
@@ -184,13 +192,15 @@ interface RotoState {
   /** Reset the canvas viewport to fit-to-container with no pan. */
   resetView: () => void;
   /**
-   * Enter temporary pan mode (Z key held). Remembers the previous tool so it
-   * can be restored on `exitPanMode`. If already in pan mode, this is a no-op.
+   * Enter temporary pan mode (Z or Space held). Remembers the previous tool
+   * so it can be restored on `exitPanMode`. If already in pan mode, this is
+   * a no-op. `source` is "z" or "space" so we can distinguish Space TAP from
+   * Space HOLD+drag later.
    */
-  enterPanMode: () => void;
+  enterPanMode: (source: "z" | "space") => void;
   /**
    * Exit temporary pan mode and restore the previously active tool.
-   * No-op if not in pan mode.
+   * No-op if not in pan mode. Also clears `panModeSource`.
    */
   exitPanMode: () => void;
   /** Add or replace shapes on the active sub-layer of the current frame. */
@@ -453,6 +463,7 @@ export const useRotoStore = create<RotoState>((set, get) => ({
   dragTransform: { active: false, mode: null, start: null, pivot: null },
   view: { zoom: 1, panX: 0, panY: 0 },
   panModePreviousTool: null,
+  panModeSource: null,
   setVideo: (url, resolution, frameCount) =>
     set((s) => {
       const frames = Array.from({ length: frameCount }, (_, i) => ({
@@ -532,14 +543,15 @@ export const useRotoStore = create<RotoState>((set, get) => ({
 
   resetView: () => set({ view: { zoom: 1, panX: 0, panY: 0 } }),
 
-  enterPanMode: () =>
+  enterPanMode: (source) =>
     set((s) => {
       // Already in pan mode — don't overwrite the saved tool.
       if (s.panModePreviousTool !== null) return {};
       return {
         panModePreviousTool: s.brush.mode,
+        panModeSource: source,
         // Switch to a synthetic "select" tool which has no canvas interaction
-        // — the canvas's pan-drag handler takes over while Z is held.
+        // — the canvas's pan-drag handler takes over while Z/Space is held.
         brush: { ...s.brush, mode: "select" },
       };
     }),
@@ -550,6 +562,7 @@ export const useRotoStore = create<RotoState>((set, get) => ({
       const prev = s.panModePreviousTool;
       return {
         panModePreviousTool: null,
+        panModeSource: null,
         brush: { ...s.brush, mode: prev },
       };
     }),
