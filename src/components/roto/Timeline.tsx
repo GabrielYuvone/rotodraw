@@ -51,6 +51,7 @@ export function Timeline({ videoRef }: TimelineProps) {
   const propagating = useRotoStore((s) => s.propagating);
   const propagationProgress = useRotoStore((s) => s.propagationProgress);
   const propagateFlow = useRotoStore((s) => s.propagateFlow);
+  const cancelPropagation = useRotoStore((s) => s.cancelPropagation);
   const setCurrentFrame = useRotoStore((s) => s.setCurrentFrame);
   const toggleKeyframe = useRotoStore((s) => s.toggleKeyframe);
   const clearFrame = useRotoStore((s) => s.clearFrame);
@@ -64,6 +65,9 @@ export function Timeline({ videoRef }: TimelineProps) {
     hasDrawingBreak(project, activeSubLayerId, currentFrame);
 
   const [playing, setPlaying] = useState(false);
+  const [propagateEndFrame, setPropagateEndFrame] = useState(
+    project.frameCount
+  );
   const rafRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
   const frameAccumRef = useRef<number>(0);
@@ -245,34 +249,56 @@ export function Timeline({ videoRef }: TimelineProps) {
                     </span>
                   </div>
                 )}
-                <Button
-                  size="sm"
-                  variant={flowEnabled ? "default" : "outline"}
-                  className="h-6 px-2 text-[10px] ml-1"
-                  disabled={
-                    !flowEnabled ||
-                    propagating ||
-                    !activeSubLayerId ||
-                    project.currentFrame >= project.frameCount - 1
-                  }
-                  onClick={() => {
-                    if (!videoRef.current) return;
-                    propagateFlow(
-                      videoRef.current,
-                      project.currentFrame,
-                      project.frameCount - 1
-                    );
-                  }}
-                >
-                  {propagating ? (
-                    <>
-                      <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                      {propagationProgress}%
-                    </>
-                  ) : (
-                    "Propagate →"
-                  )}
-                </Button>
+                {propagating ? (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    className="h-6 px-2 text-[10px] ml-1"
+                    onClick={() => cancelPropagation()}
+                  >
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    {propagationProgress}% ✕
+                  </Button>
+                ) : (
+                  <>
+                    <span className="text-[10px] text-muted-foreground ml-1">to</span>
+                    <input
+                      type="number"
+                      min={project.currentFrame + 1}
+                      max={project.frameCount}
+                      defaultValue={project.frameCount}
+                      className="h-6 w-10 text-[10px] font-mono rounded border border-input bg-background text-center"
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        if (!isNaN(v)) setPropagateEndFrame(v);
+                      }}
+                    />
+                    <Button
+                      size="sm"
+                      variant={flowEnabled ? "default" : "outline"}
+                      className="h-6 px-2 text-[10px] ml-1"
+                      disabled={
+                        !flowEnabled ||
+                        !activeSubLayerId ||
+                        project.currentFrame >= project.frameCount - 1
+                      }
+                      onClick={() => {
+                        if (!videoRef.current) return;
+                        const endFrame = Math.min(
+                          propagateEndFrame - 1,
+                          project.frameCount - 1
+                        );
+                        propagateFlow(
+                          videoRef.current,
+                          project.currentFrame,
+                          endFrame
+                        );
+                      }}
+                    >
+                      Propagate →
+                    </Button>
+                  </>
+                )}
               </div>
             </TooltipTrigger>
             <TooltipContent side="top" className="max-w-xs">
@@ -281,7 +307,8 @@ export function Timeline({ videoRef }: TimelineProps) {
               following the video's motion. Pause at any frame to manually
               correct with Deform/Node tools — the corrected frame becomes
               the new ground truth. Click Propagate again to resume from
-              there.
+              there. Set the "to" frame number to propagate by segments
+              instead of to the end. Click the ✕ button to cancel mid-run.
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>

@@ -214,6 +214,8 @@ interface RotoState {
   propagating: boolean;
   /** Propagation progress 0..100. */
   propagationProgress: number;
+  /** Cancellation flag — set by cancelPropagation(), checked by the loop. */
+  cancelPropagation: boolean;
 
 
   // ---- Actions ----
@@ -245,6 +247,9 @@ interface RotoState {
     startFrame: number,
     endFrame: number
   ) => Promise<void>;
+  /** Request cancellation of the current propagation. The loop checks this
+   * flag after each frame and stops if set. */
+  cancelPropagation: () => void;
   /** Set the canvas viewport (zoom and/or pan). Partial updates merge. */
   setView: (partial: Partial<{ zoom: number; panX: number; panY: number }>) => void;
   /** Reset the canvas viewport to fit-to-container with no pan. */
@@ -574,6 +579,7 @@ export const useRotoStore = create<RotoState>((set, get) => ({
   flowStrength: 1,
   propagating: false,
   propagationProgress: 0,
+  cancelPropagation: false,
   setVideo: (url, resolution, frameCount) =>
     set((s) => {
       const frames = Array.from({ length: frameCount }, (_, i) => ({
@@ -658,6 +664,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
 
   setFlowStrength: (strength) => set({ flowStrength: strength }),
 
+  cancelPropagation: () => set({ cancelPropagation: true }),
+
   propagateFlow: async (video, startFrame, endFrame) => {
     const s = get();
     const { project } = s;
@@ -670,7 +678,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
 
     // Push a single history snapshot for the whole propagation.
     s.pushHistory();
-    set({ propagating: true, propagationProgress: 0 });
+    // Reset cancel flag and start.
+    set({ propagating: true, propagationProgress: 0, cancelPropagation: false });
 
     const { workingWidth, workingHeight } = project.resolution;
     const fps = project.fps;
@@ -682,13 +691,27 @@ export const useRotoStore = create<RotoState>((set, get) => ({
     //   3. Compute optical flow from frameA → frameB
     //   4. Propagate each shape's points by the flow × strength
     //   5. Write the propagated shapes as a keyframe at frame N
+    //   6. Check cancel flag — if set, stop the loop.
     for (let frame = startFrame + 1; frame <= endFrame; frame++) {
+      // Check cancellation after each frame.
+      if (get().cancelPropagation) {
+        set({ propagating: false, cancelPropagation: false, propagationProgress: 0 });
+        return;
+      }
+
       const prevTime = (frame - 1) / fps;
       const currTime = frame / fps;
 
       // Seek to previous frame.
       await seekVideoAndWait(video, prevTime);
       await new Promise((r) => setTimeout(r, 30));
+
+      // Check cancellation after the await.
+      if (get().cancelPropagation) {
+        set({ propagating: false, cancelPropagation: false, propagationProgress: 0 });
+        return;
+      }
+
       const frameA = extractGrayscaleFrame(video, workingWidth, workingHeight);
       if (!frameA) {
         set({ propagationProgress: Math.round(((frame - startFrame) / totalFrames) * 100) });
@@ -698,6 +721,13 @@ export const useRotoStore = create<RotoState>((set, get) => ({
       // Seek to current frame.
       await seekVideoAndWait(video, currTime);
       await new Promise((r) => setTimeout(r, 30));
+
+      // Check cancellation after the second await.
+      if (get().cancelPropagation) {
+        set({ propagating: false, cancelPropagation: false, propagationProgress: 0 });
+        return;
+      }
+
       const frameB = extractGrayscaleFrame(video, workingWidth, workingHeight);
       if (!frameB) {
         set({ propagationProgress: Math.round(((frame - startFrame) / totalFrames) * 100) });
