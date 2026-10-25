@@ -1248,6 +1248,62 @@ export function RotoCanvas({ videoRef }: Props) {
     videoRef,
   ]);
 
+  // ----- Pointer event wrappers -----
+  // The canvas's drawing/deform/select logic is built on MouseEvent
+  // handlers (onMouseDown, onMouseMove, onMouseUp). To support stylus
+  // (Wacom, Huion, iPad, Surface Pen) and touch input, we wrap them as
+  // PointerEvent handlers. PointerEvent extends MouseEvent with extra
+  // fields (pressure, tiltX, tiltY, pointerType), so the existing code
+  // works unchanged — it just reads clientX/clientY/button which are
+  // present on PointerEvent too.
+  //
+  // The key addition is `setPointerCapture`: when the stylus presses down,
+  // we capture the pointer so that subsequent move/up events continue to
+  // be delivered to this canvas element EVEN IF the stylus leaves the
+  // canvas's bounding box. This prevents the common "drawing stops when
+  // the pen goes off the edge" bug.
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      // Capture the pointer so we keep receiving move/up events even if
+      // the stylus/touch leaves the canvas bounds.
+      const canvas = canvasRef.current;
+      if (canvas) {
+        try {
+          canvas.setPointerCapture(e.pointerId);
+        } catch {
+          // Some browsers may throw if the pointer was already captured.
+        }
+      }
+      // Forward to the existing mouse handler — PointerEvent has all
+      // the same fields (clientX, clientY, button, shiftKey, etc.).
+      onMouseDown(e);
+    },
+    [onMouseDown]
+  );
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      onMouseMove(e);
+    },
+    [onMouseMove]
+  );
+
+  const onPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        try {
+          canvas.releasePointerCapture(e.pointerId);
+        } catch {
+          // ignore
+        }
+      }
+      onMouseUp(e);
+    },
+    [onMouseUp]
+  );
+
   return (
     <div
       ref={containerRef}
@@ -1267,13 +1323,15 @@ export function RotoCanvas({ videoRef }: Props) {
         ref={canvasRef}
         width={project.resolution.workingWidth}
         height={project.resolution.workingHeight}
-        onMouseDown={onMouseDown}
-        onMouseMove={onMouseMove}
-        onMouseUp={onMouseUp}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
         onWheel={onWheel}
         onContextMenu={(e) => e.preventDefault()}
-        className="bg-black shadow-2xl rounded"
+        // Disable touch scrolling/gestures on the canvas so the stylus
+        // doesn't trigger page scroll instead of drawing.
         style={{
+          touchAction: "none",
           width: project.resolution.workingWidth * displayScale,
           height: project.resolution.workingHeight * displayScale,
           // Apply zoom + pan via CSS transform. The canvas's intrinsic pixel
