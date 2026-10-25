@@ -91,7 +91,7 @@ export default function Home() {
       />
 
       {/* Top toolbar */}
-      <Toolbar onNewProject={onNewProject} />
+      <Toolbar onNewProject={onNewProject} videoRef={videoRef} />
 
       {/* Main 3-column workspace */}
       <div className="flex-1 flex overflow-hidden">

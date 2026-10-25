@@ -17,8 +17,10 @@ import {
   ZoomIn,
   ZoomOut,
   Maximize,
+  Video,
+  Loader2,
 } from "lucide-react";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
@@ -36,12 +38,19 @@ import {
 } from "@/components/ui/toggle-group";
 import { useRotoStore } from "@/lib/roto/store";
 import type { ToolMode, DeformScope } from "@/lib/roto/types";
+import {
+  exportVideo,
+  downloadVideoBlob,
+  canExportVideo,
+} from "@/lib/roto/exportVideo";
+import { useToast } from "@/hooks/use-toast";
 
 interface Props {
   onNewProject: () => void;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
 }
 
-export function Toolbar({ onNewProject }: Props) {
+export function Toolbar({ onNewProject, videoRef }: Props) {
   const project = useRotoStore((s) => s.project);
   const brush = useRotoStore((s) => s.brush);
   const view = useRotoStore((s) => s.view);
@@ -51,8 +60,11 @@ export function Toolbar({ onNewProject }: Props) {
   const setView = useRotoStore((s) => s.setView);
   const resetView = useRotoStore((s) => s.resetView);
   const loadProject = useRotoStore((s) => s.loadProject);
+  const { toast } = useToast();
 
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
 
   const handleExport = () => {
     const data = JSON.stringify(project, null, 2);
@@ -63,6 +75,55 @@ export function Toolbar({ onNewProject }: Props) {
     a.download = `${project.name.replace(/\s+/g, "_")}.vectorrot.json`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleExportVideo = async () => {
+    const video = videoRef.current;
+    if (!video || !video.src) {
+      toast({
+        title: "No video loaded",
+        description: "Load a video before exporting.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!canExportVideo()) {
+      toast({
+        title: "Export not supported",
+        description:
+          "Your browser doesn't support video recording. Try Chrome or Firefox.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setExporting(true);
+    setExportProgress(0);
+    toast({
+      title: "Exporting video…",
+      description: `Rendering ${project.frameCount} frames at ${project.fps} FPS. Don't close the tab.`,
+    });
+    try {
+      const blob = await exportVideo(project, video, (frame, total) => {
+        setExportProgress(Math.round((frame / total) * 100));
+      });
+      const mimeType = blob.type;
+      downloadVideoBlob(blob, project.name, mimeType);
+      toast({
+        title: "Export complete",
+        description: `Video downloaded (${Math.round(blob.size / 1024)} KB).`,
+      });
+    } catch (err) {
+      console.error("Export failed:", err);
+      toast({
+        title: "Export failed",
+        description:
+          err instanceof Error ? err.message : "Unknown error during export.",
+        variant: "destructive",
+      });
+    } finally {
+      setExporting(false);
+      setExportProgress(0);
+    }
   };
 
   const handleImport = (file: File) => {
@@ -415,6 +476,31 @@ export function Toolbar({ onNewProject }: Props) {
           <TooltipButton label="Export project JSON" onClick={handleExport}>
             <Save className="h-4 w-4" />
           </TooltipButton>
+          {/* Export Video — renders every timeline frame (video + vector shapes)
+              to an offscreen canvas and records it with MediaRecorder. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={handleExportVideo}
+                disabled={exporting}
+                aria-label="Export video"
+              >
+                {exporting ? (
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <Video className="h-4 w-4" />
+                )}
+                {exporting ? `${exportProgress}%` : ""}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {exporting
+                ? `Exporting… ${exportProgress}%`
+                : "Export as video (.webm) — renders every frame with vector shapes"}
+            </TooltipContent>
+          </Tooltip>
         </div>
       </div>
     </TooltipProvider>
