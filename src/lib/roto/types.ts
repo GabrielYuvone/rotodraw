@@ -107,6 +107,7 @@ export type ToolMode =
   | "pen"
   | "blob"
   | "deform"
+  | "relax"
   | "knife"
   | "node"
   | "select";
@@ -194,4 +195,18 @@ export interface BrushConfig {
   knifeAutoClose: boolean;
   /** Node tool: snap radius in canvas-space px for selecting a node. */
   nodeSnapRadius: number;
+  /**
+   * Relax tool: brush radius in canvas-space px. Passing over a shape's
+   * nodes within this radius redistributes them evenly along the path,
+   * removing jitter and excess nodes. The tool preserves the overall shape
+   * silhouette — it only resamples the polyline at uniform arc-length
+   * intervals.
+   */
+  relaxRadius: number;
+  /**
+   * Relax tool: target node spacing as a fraction of the brush radius.
+   * 0.5 = nodes every half-radius along the path within the brush area.
+   * Lower values produce more nodes (denser), higher values produce fewer.
+   */
+  relaxSpacing: number;
 }

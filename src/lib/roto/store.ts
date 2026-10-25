@@ -22,6 +22,7 @@ import {
   booleanUnion,
   interpolateShapes,
   multiPolygonToShapes,
+  resampleWithinRadius,
   shapeToRing,
   strokeToPolygon,
   uid,
@@ -122,6 +123,8 @@ function makeDefaultBrush(): BrushConfig {
     blobSmoothing: 2,
     knifeAutoClose: true,
     nodeSnapRadius: 12,
+    relaxRadius: 60,
+    relaxSpacing: 0.4,
   };
 }
 
@@ -297,6 +300,19 @@ interface RotoState {
     shapeId: string,
     nodeIndex: number,
     target: Vec2
+  ) => void;
+  /**
+   * Relax tool: redistribute the nodes of a shape within `radius` of `center`
+   * at uniform arc-length intervals. Preserves the overall silhouette —
+   * only resamples the in-range portion. Useful for cleaning up shapes
+   * that have too many nodes or jittery node placement.
+   */
+  liveRelaxShape: (
+    subLayerId: string,
+    shapeId: string,
+    center: Vec2,
+    radius: number,
+    spacing: number
   ) => void;
   /**
    * Insert a "drawing break" at the given frame for the given sub-layer.
@@ -1096,6 +1112,52 @@ export const useRotoStore = create<RotoState>((set, get) => ({
         const newPoints = sh.points.slice();
         newPoints[nodeIndex] = target;
         return { ...sh, points: newPoints };
+      });
+      frames[idx] = {
+        ...f,
+        isKeyframe: true,
+        states: { ...f.states, [subLayerId]: next },
+      };
+      return { project: { ...s.project, frames } };
+    }),
+
+  liveRelaxShape: (subLayerId, shapeId, center, radius, spacing) =>
+    set((s) => {
+      const frames = s.project.frames.slice();
+      const idx = s.project.currentFrame;
+      const f = frames[idx];
+      if (!f) return {};
+      let existing = f.states[subLayerId];
+      if (!existing || existing.length === 0) {
+        existing = getInterpolatedShapesForFrame(s.project, idx, subLayerId);
+        if (existing.length === 0) return {};
+      }
+      const next = existing.map((sh) => {
+        if (sh.id !== shapeId) return sh;
+        // Resample the in-range portion of the shape's points uniformly.
+        const resampled = resampleWithinRadius(
+          sh.points,
+          center,
+          radius,
+          spacing,
+          sh.fill.closed
+        );
+        // If the resampled array is identical (no change), return the original
+        // to avoid unnecessary state churn.
+        if (resampled.length === sh.points.length) {
+          let same = true;
+          for (let i = 0; i < resampled.length; i++) {
+            if (
+              resampled[i].x !== sh.points[i].x ||
+              resampled[i].y !== sh.points[i].y
+            ) {
+              same = false;
+              break;
+            }
+          }
+          if (same) return sh;
+        }
+        return { ...sh, points: resampled };
       });
       frames[idx] = {
         ...f,

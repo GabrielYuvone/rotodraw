@@ -338,6 +338,137 @@ export function applySmoothingLevel(
 }
 
 // ============================================================
+// Relax / Resample
+// The Relax tool redistributes nodes evenly along a shape's path
+// within the brush area. It computes the cumulative arc length of
+// the polyline, then resamples at uniform arc-length intervals,
+// preserving the silhouette while removing jitter and excess nodes.
+// ============================================================
+
+/**
+ * Resample a polyline at uniform arc-length intervals.
+ *
+ * @param points  Input polyline.
+ * @param spacing Target distance between consecutive samples (in canvas px).
+ * @param closed  If true, the polyline is treated as closed (the last
+ *                segment connects back to the first).
+ * @returns A new array of points sampled at uniform intervals. For a
+ *          closed polyline the result has `floor(totalLength / spacing)`
+ *          points (without repeating the first at the end). For an open
+ *          polyline, the endpoints are preserved.
+ */
+export function resampleUniform(
+  points: Vec2[],
+  spacing: number,
+  closed: boolean
+): Vec2[] {
+  if (points.length < 2) return points.slice();
+  if (spacing <= 0) return points.slice();
+
+  // Compute cumulative arc length.
+  const segs: number[] = [];
+  let total = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    const d = dist(points[i], points[i + 1]);
+    segs.push(d);
+    total += d;
+  }
+  if (closed) {
+    const d = dist(points[points.length - 1], points[0]);
+    segs.push(d);
+    total += d;
+  }
+  if (total === 0) return points.slice();
+
+  // Sample at uniform intervals.
+  const out: Vec2[] = [];
+  let acc = 0;
+  let segIdx = 0;
+  let segStart = points[0];
+  let segEnd = points[1];
+
+  const advance = (targetLen: number): Vec2 => {
+    while (segIdx < segs.length && acc + segs[segIdx] < targetLen) {
+      acc += segs[segIdx];
+      segIdx++;
+      if (closed) {
+        segStart = points[segIdx % points.length];
+        segEnd = points[(segIdx + 1) % points.length];
+      } else {
+        segStart = points[Math.min(segIdx, points.length - 1)];
+        segEnd = points[Math.min(segIdx + 1, points.length - 1)];
+      }
+    }
+    if (segIdx >= segs.length) {
+      return closed ? points[0] : points[points.length - 1];
+    }
+    const remain = targetLen - acc;
+    const t = segs[segIdx] === 0 ? 0 : remain / segs[segIdx];
+    return {
+      x: segStart.x + (segEnd.x - segStart.x) * t,
+      y: segStart.y + (segEnd.y - segStart.y) * t,
+    };
+  };
+
+  if (closed) {
+    // For closed polylines, sample around the loop starting at points[0].
+    const numSamples = Math.max(3, Math.floor(total / spacing));
+    for (let i = 0; i < numSamples; i++) {
+      out.push(advance((i * total) / numSamples));
+    }
+  } else {
+    // For open polylines, preserve the endpoints.
+    out.push(points[0]);
+    let target = spacing;
+    while (target < total - spacing * 0.5) {
+      out.push(advance(target));
+      target += spacing;
+    }
+    out.push(points[points.length - 1]);
+  }
+  return out;
+}
+
+/**
+ * Resample only the portion of a polyline whose nodes fall within `radius`
+ * of `center`. Nodes outside the radius are left untouched. This is what
+ * the Relax tool applies: as the brush passes over a cluster of nodes,
+ * only the nodes within the brush are redistributed uniformly; the rest of
+ * the shape stays as-is.
+ *
+ * The resampling preserves continuity at the boundary: the first and last
+ * in-range nodes keep their positions (they're the "anchors" of the
+ * resampled segment), and the interior is resampled at uniform intervals
+ * between them.
+ */
+export function resampleWithinRadius(
+  points: Vec2[],
+  center: Vec2,
+  radius: number,
+  spacing: number,
+  closed: boolean
+): Vec2[] {
+  if (points.length < 3) return points.slice();
+  // Find indices of nodes within the brush radius.
+  const inRange = points
+    .map((p, i) => ({ i, d: dist(p, center) }))
+    .filter((x) => x.d <= radius);
+  if (inRange.length < 3) return points.slice();
+  const firstIdx = inRange[0].i;
+  const lastIdx = inRange[inRange.length - 1].i;
+  // Extract the segment to resample (firstIdx .. lastIdx inclusive).
+  const segment = points.slice(firstIdx, lastIdx + 1);
+  // Resample the interior at uniform intervals, preserving endpoints.
+  const resampled = resampleUniform(segment, spacing, false);
+  // Reassemble: points before firstIdx + resampled + points after lastIdx.
+  return [
+    ...points.slice(0, firstIdx),
+    ...resampled,
+    ...points.slice(lastIdx + 1),
+  ];
+}
+
+// ============================================================
 // Polygon Boolean Utilities
 // Used by the Blob Brush (boolean union of strokes), the Knife
 // tool (boolean subtraction to slice shapes), and the global

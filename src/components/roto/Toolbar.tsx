@@ -19,6 +19,7 @@ import {
   Maximize,
   Video,
   Loader2,
+  Waves,
 } from "lucide-react";
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -167,6 +168,7 @@ export function Toolbar({ onNewProject, videoRef }: Props) {
           <ToolToggle value="draw" label="Draw Brush — vector stroke with black outline" icon={<Pen className="h-4 w-4" />} />
           <ToolToggle value="blob" label="Blob Brush — boolean union of same-color strokes" icon={<CircleDot className="h-4 w-4" />} />
           <ToolToggle value="deform" label="Deform / Liquify — proportional push/pull" icon={<Spline className="h-4 w-4" />} />
+          <ToolToggle value="relax" label="Relax — redistribute nodes evenly along path (drag over)" icon={<Waves className="h-4 w-4" />} />
           <ToolToggle value="knife" label="Knife — slice closed shapes into pieces" icon={<Scissors className="h-4 w-4" />} />
           <ToolToggle value="node" label="Node — edit control points / delete fragments" icon={<SplineIcon className="h-4 w-4" />} />
           <ToolToggle value="select" label="Select / Move — transform whole shapes" icon={<MousePointer2 className="h-4 w-4" />} />
@@ -370,6 +372,34 @@ export function Toolbar({ onNewProject, videoRef }: Props) {
             </div>
             <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-muted/50">
               Use [ ] keys to adjust radius · scroll wheel to zoom
+            </span>
+          </div>
+        )}
+
+        {brush.mode === "relax" && (
+          <div className="flex items-center gap-3 flex-wrap">
+            <SliderSetting
+              label="Radius"
+              icon={<Waves className="h-3 w-3" />}
+              value={brush.relaxRadius}
+              min={10}
+              max={200}
+              step={5}
+              onChange={(v) => setBrush({ relaxRadius: v })}
+              unit="px"
+            />
+            <SliderSetting
+              label="Density"
+              value={brush.relaxSpacing}
+              min={0.2}
+              max={1}
+              step={0.05}
+              onChange={(v) => setBrush({ relaxSpacing: v })}
+              format={(v) => `${Math.round(v * 100)}%`}
+            />
+            <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-muted/50">
+              Drag over a shape to redistribute its nodes evenly. Lower
+              density = fewer nodes. Use [ ] to resize the brush.
             </span>
           </div>
         )}

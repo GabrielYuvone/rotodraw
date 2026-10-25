@@ -36,6 +36,7 @@ export function RotoCanvas({ videoRef }: Props) {
   const deleteShape = useRotoStore((s) => s.deleteShape);
   const deleteNode = useRotoStore((s) => s.deleteNode);
   const liveMoveNode = useRotoStore((s) => s.liveMoveNode);
+  const liveRelaxShape = useRotoStore((s) => s.liveRelaxShape);
   const liveDeformShape = useRotoStore((s) => s.liveDeformShape);
   const liveDeformLayer = useRotoStore((s) => s.liveDeformLayer);
   const liveTransformShapes = useRotoStore((s) => s.liveTransformShapes);
@@ -125,6 +126,16 @@ export function RotoCanvas({ videoRef }: Props) {
     shapeId: string;
     nodeIndex: number;
   } | null>(null);
+  // Relax-tool drag state: which shape is being relaxed by the current drag.
+  const relaxingRef = useRef<{
+    subLayerId: string;
+    shapeId: string;
+  } | null>(null);
+  // Relax-tool: list of all shapes in range (the brush may cover multiple
+  // shapes, and we relax each one independently).
+  const relaxingShapesRef = useRef<
+    { subLayerId: string; shapeId: string }[] | null
+  >(null);
   // Pen-tool state: the in-progress polyline of anchor points. The user
   // clicks to add anchors; we render a rubber-band preview from the last
   // anchor to the cursor. Double-click or Enter finishes the path and commits
@@ -443,10 +454,59 @@ export function RotoCanvas({ videoRef }: Props) {
             ],
           };
         }
+      } else if (mode === "relax") {
+        // Relax tool: drag redistributes nodes uniformly within the brush
+        // radius. We find ALL shapes that have at least one node within the
+        // brush radius and start a relax drag for each. This is more forgiving
+        // than findShapeAt (which requires hitting the outline or being
+        // inside a closed polygon).
+        const r = brush.relaxRadius;
+        const shapesInRange: { subLayerId: string; shapeId: string }[] = [];
+        for (const layer of project.layers) {
+          if (!layer.visible || layer.locked) continue;
+          for (const sub of layer.subLayers) {
+            if (!sub.visible || sub.locked) continue;
+            const shapes = getInterpolatedShapesForFrame(
+              project,
+              project.currentFrame,
+              sub.id
+            );
+            for (const sh of shapes) {
+              const hasNodeInRange = sh.points.some(
+                (pt) => Math.hypot(pt.x - p.x, pt.y - p.y) <= r
+              );
+              if (hasNodeInRange) {
+                shapesInRange.push({
+                  subLayerId: sub.id,
+                  shapeId: sh.id,
+                });
+              }
+            }
+          }
+        }
+        if (shapesInRange.length === 0) return;
+        // Push a history snapshot for the entire relax drag.
+        pushHistory();
+        relaxingRef.current = shapesInRange[0]; // store the first one; we'll
+        // apply relax to all in-range shapes on each mousemove via the
+        // relaxShapesInRange helper.
+        relaxingShapesRef.current = shapesInRange;
       } else if (mode === "node") {
         // First try to hit a node of an already-selected shape.
         const nodeHit = findNodeAt(p, brush.nodeSnapRadius);
         if (nodeHit) {
+          // Shift+click on a node deletes it directly (quick cleanup when
+          // there are too many nodes).
+          if (e.shiftKey) {
+            pushHistory();
+            deleteNode(
+              nodeHit.subLayer.id,
+              nodeHit.shape.id,
+              nodeHit.nodeIndex
+            );
+            setSelectedNode(null);
+            return;
+          }
           // Select the shape (if not already selected) and start node drag.
           if (!selectedShapeIds.includes(nodeHit.shape.id)) {
             selectShapes([nodeHit.shape.id]);
@@ -528,6 +588,8 @@ export function RotoCanvas({ videoRef }: Props) {
       panModePreviousTool,
       panModeSource,
       pushHistory,
+      deleteNode,
+      brush.relaxRadius,
     ]
   );
 
@@ -624,6 +686,25 @@ export function RotoCanvas({ videoRef }: Props) {
         return;
       }
 
+      // Relax tool drag — redistribute nodes uniformly within the brush
+      // radius around the current cursor position. Each mousemove triggers
+      // a resampling pass; passing over a cluster of jittery nodes smooths
+      // them out in real time. We apply relax to every shape captured at
+      // mousedown (the brush may cover multiple shapes).
+      if (relaxingShapesRef.current && relaxingShapesRef.current.length > 0) {
+        const spacing = brush.relaxRadius * brush.relaxSpacing;
+        for (const target of relaxingShapesRef.current) {
+          liveRelaxShape(
+            target.subLayerId,
+            target.shapeId,
+            p,
+            brush.relaxRadius,
+            spacing
+          );
+        }
+        return;
+      }
+
       // Selecting — update marquee box
       if (selectingRef.current) {
         selectingRef.current.marquee = p;
@@ -678,7 +759,7 @@ export function RotoCanvas({ videoRef }: Props) {
         return;
       }
     },
-    [brush.deformRadius, brush.deformStrength, liveDeformShape, liveDeformLayer, liveMoveNode, liveTransformShapes, toCanvasCoords, view, setView]
+    [brush.deformRadius, brush.deformStrength, brush.relaxRadius, brush.relaxSpacing, liveDeformShape, liveDeformLayer, liveMoveNode, liveRelaxShape, liveTransformShapes, toCanvasCoords, view, setView]
   );
 
   const onMouseUp = useCallback(() => {
@@ -758,6 +839,14 @@ export function RotoCanvas({ videoRef }: Props) {
     // Finalize node drag.
     if (nodeDragRef.current) {
       nodeDragRef.current = null;
+    }
+
+    // Finalize relax drag.
+    if (relaxingRef.current) {
+      relaxingRef.current = null;
+    }
+    if (relaxingShapesRef.current) {
+      relaxingShapesRef.current = null;
     }
 
     // Finalize marquee selection
@@ -999,6 +1088,11 @@ export function RotoCanvas({ videoRef }: Props) {
             .getState()
             .setBrush({ blobBrushRadius: Math.max(4, cur.blobBrushRadius - 2) });
           e.preventDefault();
+        } else if (cur.mode === "relax") {
+          useRotoStore
+            .getState()
+            .setBrush({ relaxRadius: Math.max(10, cur.relaxRadius - 5) });
+          e.preventDefault();
         }
         return;
       }
@@ -1013,6 +1107,11 @@ export function RotoCanvas({ videoRef }: Props) {
           useRotoStore
             .getState()
             .setBrush({ blobBrushRadius: Math.min(120, cur.blobBrushRadius + 2) });
+          e.preventDefault();
+        } else if (cur.mode === "relax") {
+          useRotoStore
+            .getState()
+            .setBrush({ relaxRadius: Math.min(200, cur.relaxRadius + 5) });
           e.preventDefault();
         }
         return;
@@ -1186,7 +1285,7 @@ export function RotoCanvas({ videoRef }: Props) {
           cursor:
             panModePreviousTool !== null
               ? "grab"
-              : brush.mode === "deform"
+              : brush.mode === "deform" || brush.mode === "relax"
               ? "none"
               : brush.mode === "node"
               ? "default"
@@ -1202,6 +1301,14 @@ export function RotoCanvas({ videoRef }: Props) {
           y={canvasBase.top + cursor.y * displayScale * view.zoom + view.panY}
           radius={brush.deformRadius * displayScale * view.zoom}
           strength={brush.deformStrength}
+        />
+      )}
+      {cursor && cursorOverCanvas && brush.mode === "relax" && (
+        <BrushCursor
+          x={canvasBase.left + cursor.x * displayScale * view.zoom + view.panX}
+          y={canvasBase.top + cursor.y * displayScale * view.zoom + view.panY}
+          radius={brush.relaxRadius * displayScale * view.zoom}
+          strength={0.5}
         />
       )}
       {cursor && cursorOverCanvas && brush.mode === "blob" && (
