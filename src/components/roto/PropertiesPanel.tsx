@@ -395,7 +395,8 @@ export function PropertiesPanel() {
               <li><strong>Deform (Local)</strong>: push only the sub-layer under cursor.</li>
               <li><strong>Deform (Global)</strong>: push the entire parent layer (eyes + mouth + outlines) together.</li>
               <li>Hold <kbd>Shift</kbd> while dragging in Select mode to scale; <kbd>Alt</kbd> to rotate.</li>
-              <li>Scroll wheel in Deform or Blob mode to resize the brush.</li>
+              <li><kbd>Scroll wheel</kbd> zooms in/out at the cursor · <kbd>Z</kbd> + drag pans · release Z to return to your tool · <kbd>0</kbd> resets the view.</li>
+              <li>Use <kbd>[</kbd> / <kbd>]</kbd> to adjust the Deform / Blob brush radius (the wheel is reserved for zoom).</li>
             </ul>
           </section>
         </div>

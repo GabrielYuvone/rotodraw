@@ -14,6 +14,9 @@ import {
   Spline as SplineIcon,
   Globe,
   Crosshair,
+  ZoomIn,
+  ZoomOut,
+  Maximize,
 } from "lucide-react";
 import { useRef } from "react";
 import { Button } from "@/components/ui/button";
@@ -41,9 +44,12 @@ interface Props {
 export function Toolbar({ onNewProject }: Props) {
   const project = useRotoStore((s) => s.project);
   const brush = useRotoStore((s) => s.brush);
+  const view = useRotoStore((s) => s.view);
   const setTool = useRotoStore((s) => s.setTool);
   const setBrush = useRotoStore((s) => s.setBrush);
   const setProjectName = useRotoStore((s) => s.setProjectName);
+  const setView = useRotoStore((s) => s.setView);
+  const resetView = useRotoStore((s) => s.resetView);
   const loadProject = useRotoStore((s) => s.loadProject);
 
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -234,7 +240,7 @@ export function Toolbar({ onNewProject }: Props) {
               />
             </div>
             <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-muted/50">
-              Scroll on canvas to adjust radius
+              Use [ ] keys to adjust radius · scroll wheel to zoom
             </span>
           </div>
         )}
@@ -288,6 +294,78 @@ export function Toolbar({ onNewProject }: Props) {
         )}
 
         <div className="flex-1" />
+
+        {/* Zoom controls */}
+        <div className="flex items-center gap-1 rounded-md border border-input p-0.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2"
+                onClick={() => {
+                  // Read the live zoom from the store so rapid clicks accumulate
+                  // instead of all using the same closure-captured value.
+                  const cur = useRotoStore.getState().view.zoom;
+                  setView({ zoom: Math.max(0.1, cur / 1.2) });
+                }}
+                aria-label="Zoom out"
+              >
+                <ZoomOut className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Zoom out (scroll wheel down)</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={resetView}
+                className="h-7 px-2 rounded text-xs font-mono tabular-nums hover:bg-accent"
+                title="Reset view to fit (press 0)"
+              >
+                {Math.round(view.zoom * 100)}%
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              Reset view to fit (press 0)
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2"
+                onClick={() => {
+                  const cur = useRotoStore.getState().view.zoom;
+                  setView({ zoom: Math.min(16, cur * 1.2) });
+                }}
+                aria-label="Zoom in"
+              >
+                <ZoomIn className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Zoom in (scroll wheel up)</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2"
+                onClick={resetView}
+                aria-label="Reset view"
+              >
+                <Maximize className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              Reset view (fit canvas) · also press 0
+            </TooltipContent>
+          </Tooltip>
+        </div>
+
+        <Separator orientation="vertical" className="h-6" />
 
         {/* File ops */}
         <div className="flex items-center gap-1">

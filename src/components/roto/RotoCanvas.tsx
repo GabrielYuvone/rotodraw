@@ -42,6 +42,12 @@ export function RotoCanvas({ videoRef }: Props) {
   const clearSelection = useRotoStore((s) => s.clearSelection);
   const setBrush = useRotoStore((s) => s.setBrush);
   const toggleDrawingBreak = useRotoStore((s) => s.toggleDrawingBreak);
+  const view = useRotoStore((s) => s.view);
+  const setView = useRotoStore((s) => s.setView);
+  const resetView = useRotoStore((s) => s.resetView);
+  const enterPanMode = useRotoStore((s) => s.enterPanMode);
+  const exitPanMode = useRotoStore((s) => s.exitPanMode);
+  const panModePreviousTool = useRotoStore((s) => s.panModePreviousTool);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -84,6 +90,12 @@ export function RotoCanvas({ videoRef }: Props) {
     subLayerId: string;
     shapeId: string;
     nodeIndex: number;
+  } | null>(null);
+  // Pan-mode drag state: when Z is held, drag pans the canvas. Stores the
+  // last cursor position so we can compute the delta on each mousemove.
+  const panDragRef = useRef<{
+    lastClientX: number;
+    lastClientY: number;
   } | null>(null);
 
   // ----- Clear node selection whenever the tool changes -----
@@ -235,6 +247,14 @@ export function RotoCanvas({ videoRef }: Props) {
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button === 2) return; // right-click ignored
+      // If we're in temporary pan mode (Z held), start a pan drag instead of
+      // any tool action. Middle-mouse button also pans (a common convention
+      // in graphics editors).
+      if (panModePreviousTool !== null || e.button === 1) {
+        panDragRef.current = { lastClientX: e.clientX, lastClientY: e.clientY };
+        e.preventDefault();
+        return;
+      }
       const p = toCanvasCoords(e);
       const mode = brush.mode;
       const activeSubLayerId = project.activeSubLayerId;
@@ -357,11 +377,24 @@ export function RotoCanvas({ videoRef }: Props) {
       selectShapes,
       clearSelection,
       toCanvasCoords,
+      panModePreviousTool,
     ]
   );
 
   const onMouseMove = useCallback(
     (e: React.MouseEvent) => {
+      // Pan drag takes priority over everything else.
+      if (panDragRef.current) {
+        const dx = e.clientX - panDragRef.current.lastClientX;
+        const dy = e.clientY - panDragRef.current.lastClientY;
+        panDragRef.current.lastClientX = e.clientX;
+        panDragRef.current.lastClientY = e.clientY;
+        setView({
+          panX: view.panX + dx,
+          panY: view.panY + dy,
+        });
+        return;
+      }
       const p = toCanvasCoords(e);
       setCursor(p);
 
@@ -471,10 +504,16 @@ export function RotoCanvas({ videoRef }: Props) {
         return;
       }
     },
-    [brush.deformRadius, brush.deformStrength, liveDeformShape, liveDeformLayer, liveMoveNode, liveTransformShapes, toCanvasCoords]
+    [brush.deformRadius, brush.deformStrength, liveDeformShape, liveDeformLayer, liveMoveNode, liveTransformShapes, toCanvasCoords, view, setView]
   );
 
   const onMouseUp = useCallback(() => {
+    // Finalize pan drag — just clear the ref; view state was already updated
+    // continuously during mousemove.
+    if (panDragRef.current) {
+      panDragRef.current = null;
+      return;
+    }
     // Finalize drawing — draw / blob / knife all use drawingRef
     if (drawingRef.current) {
       const d = drawingRef.current;
@@ -639,24 +678,150 @@ export function RotoCanvas({ videoRef }: Props) {
     toggleDrawingBreak,
   ]);
 
-  // ----- Mouse wheel: adjust deform/blob radius -----
+  // ----- Mouse wheel: zoom in/out at the cursor position -----
+  // Always zooms (regardless of tool). The deform/blob brush radius is now
+  // adjusted via the [ and ] keyboard shortcuts.
+  //
+  // The zoom is anchored to the cursor: the canvas-space point under the
+  // cursor stays under the cursor after the zoom. We achieve this by
+  // computing the new pan offset so that:
+  //   (clientX - newPanX) / newZoom = (clientX - oldPanX) / oldZoom
+  // where panX/panY are screen-space offsets of the canvas's top-left corner
+  // relative to the container's top-left.
 
   const onWheel = useCallback(
     (e: React.WheelEvent) => {
-      if (brush.mode === "deform") {
-        e.preventDefault?.();
-        const delta = -Math.sign(e.deltaY) * 8;
-        const next = Math.max(8, Math.min(400, brush.deformRadius + delta));
-        setBrush({ deformRadius: next });
-      } else if (brush.mode === "blob") {
-        e.preventDefault?.();
-        const delta = -Math.sign(e.deltaY) * 2;
-        const next = Math.max(4, Math.min(120, brush.blobBrushRadius + delta));
-        setBrush({ blobBrushRadius: next });
-      }
+      e.preventDefault?.();
+      const container = containerRef.current;
+      if (!container) return;
+      const containerRect = container.getBoundingClientRect();
+      // Cursor position relative to the container (which is the canvas's
+      // parent and the origin of the CSS transform we apply).
+      const cx = e.clientX - containerRect.left;
+      const cy = e.clientY - containerRect.top;
+      const oldZoom = view.zoom;
+      // Zoom factor: scroll up = zoom in, scroll down = zoom out.
+      // Multiplicative step keeps the feel smooth.
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      const nextZoom = Math.max(0.1, Math.min(16, oldZoom * factor));
+      if (nextZoom === oldZoom) return;
+      // Compute the canvas's current screen-space top-left from the
+      // container's coordinate system. The canvas is centered in the
+      // container at zoom 1, then pan is applied. We compute the canvas's
+      // "natural" centered position (without pan) and then apply pan.
+      // Actually, the CSS uses transform: translate(panX, panY) scale(zoom)
+      // applied to a canvas whose base size is workingW*displayScale ×
+      // workingH*displayScale, centered in the container via flexbox.
+      // The canvas's top-left (in container coords) before transform is:
+      //   baseLeft = (container.width - canvasW*displayScale) / 2
+      //   baseTop  = (container.height - canvasH*displayScale) / 2
+      // After transform: topLeft = baseLeft + panX (panY similarly), and
+      // the cursor's offset from the canvas's top-left in canvas-pixel space
+      // (before scaling) is: (cx - (baseLeft + panX)) / (displayScale * zoom)
+      // To anchor zoom to cursor: this offset must stay the same.
+      //   (cx - (baseLeft + newPanX)) / (displayScale * newZoom) =
+      //   (cx - (baseLeft + oldPanX)) / (displayScale * oldZoom)
+      // Solve for newPanX:
+      //   newPanX = cx - baseLeft - (cx - baseLeft - oldPanX) * newZoom / oldZoom
+      // (Same for newPanY with cy/baseTop.)
+      const baseLeft =
+        (container.clientWidth -
+          project.resolution.workingWidth * displayScale) /
+        2;
+      const baseTop =
+        (container.clientHeight -
+          project.resolution.workingHeight * displayScale) /
+        2;
+      const newPanX =
+        cx - baseLeft - (cx - baseLeft - view.panX) * (nextZoom / oldZoom);
+      const newPanY =
+        cy - baseTop - (cy - baseTop - view.panY) * (nextZoom / oldZoom);
+      setView({ zoom: nextZoom, panX: newPanX, panY: newPanY });
     },
-    [brush.mode, brush.deformRadius, brush.blobBrushRadius, setBrush]
+    [view, displayScale, project.resolution.workingWidth, project.resolution.workingHeight, setView]
   );
+
+  // ----- Keyboard: Z to temporarily pan, [ ] to adjust brush radius -----
+  // Z is held down to enter pan mode: drag pans the canvas, and releasing Z
+  // restores the previously active tool. The brush radius is now adjusted
+  // with [ (smaller) and ] (larger) since the mouse wheel is reserved for
+  // zoom-to-cursor.
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Ignore typing in inputs
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      // "Z" key — temporarily enter pan mode (don't repeat-fire on hold).
+      if ((e.key === "z" || e.key === "Z") && !e.repeat) {
+        enterPanMode();
+        e.preventDefault();
+        return;
+      }
+      // "[" / "]" — adjust the active tool's primary radius.
+      //   - In deform mode: deform brush radius (8..400, step 8)
+      //   - In blob mode: blob brush radius (4..120, step 2)
+      // No-op in other modes. We read the latest brush state via
+      // `useRotoStore.getState()` so that rapid key repeats (which fire before
+      // the effect re-runs and re-binds the handler) accumulate correctly.
+      if (e.key === "[") {
+        const cur = useRotoStore.getState().brush;
+        if (cur.mode === "deform") {
+          useRotoStore
+            .getState()
+            .setBrush({ deformRadius: Math.max(8, cur.deformRadius - 8) });
+          e.preventDefault();
+        } else if (cur.mode === "blob") {
+          useRotoStore
+            .getState()
+            .setBrush({ blobBrushRadius: Math.max(4, cur.blobBrushRadius - 2) });
+          e.preventDefault();
+        }
+        return;
+      }
+      if (e.key === "]") {
+        const cur = useRotoStore.getState().brush;
+        if (cur.mode === "deform") {
+          useRotoStore
+            .getState()
+            .setBrush({ deformRadius: Math.min(400, cur.deformRadius + 8) });
+          e.preventDefault();
+        } else if (cur.mode === "blob") {
+          useRotoStore
+            .getState()
+            .setBrush({ blobBrushRadius: Math.min(120, cur.blobBrushRadius + 2) });
+          e.preventDefault();
+        }
+        return;
+      }
+      // "0" key — reset view to fit.
+      if (e.key === "0") {
+        resetView();
+        e.preventDefault();
+        return;
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "z" || e.key === "Z") {
+        exitPanMode();
+        // Also terminate any in-progress pan drag.
+        panDragRef.current = null;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [enterPanMode, exitPanMode, resetView]);
 
   // ----- Render loop -----
 
@@ -766,8 +931,16 @@ export function RotoCanvas({ videoRef }: Props) {
         style={{
           width: project.resolution.workingWidth * displayScale,
           height: project.resolution.workingHeight * displayScale,
+          // Apply zoom + pan via CSS transform. The canvas's intrinsic pixel
+          // size stays at workingWidth × workingHeight (no re-rasterization
+          // needed on zoom/pan). The transform-origin is set to top-left so
+          // that pan offsets compose intuitively with the scale.
+          transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`,
+          transformOrigin: "top left",
           cursor:
-            brush.mode === "deform"
+            panModePreviousTool !== null
+              ? "grab"
+              : brush.mode === "deform"
               ? "none"
               : brush.mode === "node"
               ? "default"
@@ -779,17 +952,17 @@ export function RotoCanvas({ videoRef }: Props) {
       />
       {cursor && cursorOverCanvas && brush.mode === "deform" && (
         <BrushCursor
-          x={cursor.x * displayScale}
-          y={cursor.y * displayScale}
-          radius={brush.deformRadius * displayScale}
+          x={cursor.x * displayScale * view.zoom + view.panX}
+          y={cursor.y * displayScale * view.zoom + view.panY}
+          radius={brush.deformRadius * displayScale * view.zoom}
           strength={brush.deformStrength}
         />
       )}
       {cursor && cursorOverCanvas && brush.mode === "blob" && (
         <BlobCursor
-          x={cursor.x * displayScale}
-          y={cursor.y * displayScale}
-          radius={brush.blobBrushRadius * displayScale}
+          x={cursor.x * displayScale * view.zoom + view.panX}
+          y={cursor.y * displayScale * view.zoom + view.panY}
+          radius={brush.blobBrushRadius * displayScale * view.zoom}
         />
       )}
     </div>

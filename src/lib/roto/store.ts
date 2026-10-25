@@ -148,6 +148,24 @@ interface RotoState {
     start: Vec2 | null;
     pivot: Vec2 | null;
   };
+  /**
+   * Canvas viewport state: zoom factor and pan offset (in screen-space pixels
+   * relative to the canvas container's center). Zoom 1 = fit-to-container;
+   * higher values zoom in. The canvas is rendered at native pixel size and
+   * scaled via CSS transform — this avoids re-rasterizing the canvas content
+   * on every zoom/pan, keeping the operation cheap.
+   */
+  view: {
+    zoom: number;
+    panX: number;
+    panY: number;
+  };
+  /**
+   * When the user holds Z to temporarily pan, we remember the previously
+   * active tool here so we can restore it on release. Null when no temporary
+   * switch is active.
+   */
+  panModePreviousTool: ToolMode | null;
 
   // ---- Actions ----
   setVideo: (url: string, resolution: ResolutionConfig, frameCount: number) => void;
@@ -161,6 +179,20 @@ interface RotoState {
   setCurrentFrame: (index: number) => void;
   toggleKeyframe: (index: number) => void;
   clearFrame: (index: number) => void;
+  /** Set the canvas viewport (zoom and/or pan). Partial updates merge. */
+  setView: (partial: Partial<{ zoom: number; panX: number; panY: number }>) => void;
+  /** Reset the canvas viewport to fit-to-container with no pan. */
+  resetView: () => void;
+  /**
+   * Enter temporary pan mode (Z key held). Remembers the previous tool so it
+   * can be restored on `exitPanMode`. If already in pan mode, this is a no-op.
+   */
+  enterPanMode: () => void;
+  /**
+   * Exit temporary pan mode and restore the previously active tool.
+   * No-op if not in pan mode.
+   */
+  exitPanMode: () => void;
   /** Add or replace shapes on the active sub-layer of the current frame. */
   commitShapes: (subLayerId: string, shapes: VectorShape[]) => void;
   /** Deform a shape's points (used by deform brush live). */
@@ -419,6 +451,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
   videoReady: false,
   selectedShapeIds: [],
   dragTransform: { active: false, mode: null, start: null, pivot: null },
+  view: { zoom: 1, panX: 0, panY: 0 },
+  panModePreviousTool: null,
   setVideo: (url, resolution, frameCount) =>
     set((s) => {
       const frames = Array.from({ length: frameCount }, (_, i) => ({
@@ -491,6 +525,33 @@ export const useRotoStore = create<RotoState>((set, get) => ({
       if (!f) return {};
       frames[index] = { ...f, isKeyframe: false, states: {} };
       return { project: { ...s.project, frames } };
+    }),
+
+  setView: (partial) =>
+    set((s) => ({ view: { ...s.view, ...partial } })),
+
+  resetView: () => set({ view: { zoom: 1, panX: 0, panY: 0 } }),
+
+  enterPanMode: () =>
+    set((s) => {
+      // Already in pan mode — don't overwrite the saved tool.
+      if (s.panModePreviousTool !== null) return {};
+      return {
+        panModePreviousTool: s.brush.mode,
+        // Switch to a synthetic "select" tool which has no canvas interaction
+        // — the canvas's pan-drag handler takes over while Z is held.
+        brush: { ...s.brush, mode: "select" },
+      };
+    }),
+
+  exitPanMode: () =>
+    set((s) => {
+      if (s.panModePreviousTool === null) return {};
+      const prev = s.panModePreviousTool;
+      return {
+        panModePreviousTool: null,
+        brush: { ...s.brush, mode: prev },
+      };
     }),
 
   commitShapes: (subLayerId, shapes) =>
@@ -667,7 +728,7 @@ export const useRotoStore = create<RotoState>((set, get) => ({
         if (r) rings.push(r);
       }
       const multi = booleanUnion(rings);
-      const merged = multiPolygonToShapes(multi, {
+      let merged = multiPolygonToShapes(multi, {
         stroke: {
           color: strokeColor,
           width: strokeWidth,
@@ -676,13 +737,59 @@ export const useRotoStore = create<RotoState>((set, get) => ({
         },
         fill: { enabled: true, color: fillColor, closed: true },
       });
+      // Safety net: if the boolean union produced zero shapes (e.g., the
+      // polygon-clipping library rejected the input as degenerate), fall
+      // back to treating the new stroke as a standalone shape. This keeps
+      // the Blob brush usable even when strokes are very small or have
+      // unusual geometry.
+      if (merged.length === 0) {
+        // Convert the new ring directly into a closed VectorShape.
+        const points: Vec2[] = newRing.slice(0, -1).map((p) => ({
+          x: p[0],
+          y: p[1],
+        }));
+        if (points.length >= 3) {
+          merged = [
+            {
+              id: uid("shape"),
+              points,
+              stroke: {
+                color: strokeColor,
+                width: strokeWidth,
+                jitter: 0,
+                variance: 0,
+              },
+              fill: { enabled: true, color: fillColor, closed: true },
+              seed: Math.floor(Math.random() * 1e9),
+            },
+          ];
+        }
+      }
       // Final state: other shapes + merged shapes.
+      // If the frame was already a keyframe with shapes for this sub-layer,
+      // APPEND the merged shapes to the other-color shapes (preserve them).
+      // Otherwise REPLACE the (possibly interpolated) state with the new one.
+      const wasKeyframeWithShapes = f.isKeyframe && f.states[subLayerId];
+      const finalShapes = wasKeyframeWithShapes
+        ? // The other shapes from the existing keyframe are kept; the same-color
+          // ones are replaced by the merged result (since the new stroke was
+          // unioned with them). So we keep f.states[subLayerId] minus the
+          // same-color originals, plus the merged result.
+          [
+            ...(f.states[subLayerId] ?? []).filter(
+              (sh) =>
+                sh.fill.color.toLowerCase() !== fillColor.toLowerCase() ||
+                !sh.fill.closed
+            ),
+            ...merged,
+          ]
+        : [...other, ...merged];
       frames[idx] = {
         ...f,
         isKeyframe: true,
         states: {
           ...f.states,
-          [subLayerId]: [...other, ...merged],
+          [subLayerId]: finalShapes,
         },
       };
       return { project: { ...s.project, frames } };
