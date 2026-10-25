@@ -12,6 +12,8 @@ export interface Vec2 {
 
 /** Stroke style applied to a vector shape (comic outline). */
 export interface StrokeStyle {
+  /** Whether the stroke is drawn at all. When false, only the fill is rendered. */
+  enabled: boolean;
   color: string;        // hex/rgb. Default "#000000" for black comic outline
   width: number;        // px in canvas space
   /** Organic stroke variance — 0 = rigid, 1 = strong "line boil" jitter. */
@@ -162,6 +164,10 @@ export interface BrushConfig {
   deformScope: DeformScope;
   /** Drawing stroke width. */
   drawStrokeWidth: number;
+  /** Whether the black comic outline is drawn on new strokes. */
+  drawStrokeEnabled: boolean;
+  /** Whether the fill color is applied to new strokes. */
+  drawFillEnabled: boolean;
   /** Drawing stroke jitter (line boil amount). */
   drawStrokeJitter: number;
   /** Drawing stroke variance. */

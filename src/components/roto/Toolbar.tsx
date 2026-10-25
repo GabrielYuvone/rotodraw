@@ -218,7 +218,29 @@ export function Toolbar({ onNewProject, videoRef }: Props) {
               format={(v) => `${Math.round(v * 100)}%`}
             />
             <label className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={brush.drawStrokeEnabled}
+                onChange={(e) =>
+                  setBrush({ drawStrokeEnabled: e.target.checked })
+                }
+                className="rounded"
+              />
+              <span>Outline</span>
+            </label>
+            <label className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={brush.drawFillEnabled}
+                onChange={(e) =>
+                  setBrush({ drawFillEnabled: e.target.checked })
+                }
+                className="rounded"
+              />
               <span>Fill</span>
+            </label>
+            <label className="flex items-center gap-1.5 text-xs">
+              <span>Color</span>
               <input
                 type="color"
                 value={brush.fillColor}
@@ -263,7 +285,29 @@ export function Toolbar({ onNewProject, videoRef }: Props) {
               }
             />
             <label className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={brush.drawStrokeEnabled}
+                onChange={(e) =>
+                  setBrush({ drawStrokeEnabled: e.target.checked })
+                }
+                className="rounded"
+              />
+              <span>Outline</span>
+            </label>
+            <label className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={brush.drawFillEnabled}
+                onChange={(e) =>
+                  setBrush({ drawFillEnabled: e.target.checked })
+                }
+                className="rounded"
+              />
               <span>Fill</span>
+            </label>
+            <label className="flex items-center gap-1.5 text-xs">
+              <span>Color</span>
               <input
                 type="color"
                 value={brush.fillColor}

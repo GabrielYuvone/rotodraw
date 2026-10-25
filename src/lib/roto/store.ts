@@ -111,6 +111,8 @@ function makeDefaultBrush(): BrushConfig {
     deformStrength: 0.4,
     deformScope: "local",
     drawStrokeWidth: 3,
+    drawStrokeEnabled: true,
+    drawFillEnabled: true,
     drawStrokeJitter: 0.4,
     drawStrokeVariance: 0.2,
     drawSmoothing: 2,
@@ -264,7 +266,9 @@ interface RotoState {
     fillColor: string,
     radius: number,
     strokeColor: string,
-    strokeWidth: number
+    strokeWidth: number,
+    strokeEnabled: boolean,
+    fillEnabled: boolean
   ) => void;
   /**
    * Knife tool: subtracts the cut path (closed) from all shapes in the active
@@ -470,6 +474,26 @@ function withDefaultActive(proj: RotoProject): RotoProject {
   }
   // Backward-compatibility: older project JSON may not have drawingBreaks.
   if (!proj.drawingBreaks) proj.drawingBreaks = {};
+  // Backward-compatibility: older shapes may not have stroke.enabled (was
+  // always true before this field was added). Default to true so legacy
+  // projects keep their black outlines.
+  for (const layer of proj.layers) {
+    for (const sub of layer.subLayers) {
+      // Sub-layer shapes (template — currently unused but kept for future).
+      for (const sh of sub.shapes) {
+        if (sh.stroke.enabled === undefined) sh.stroke.enabled = true;
+      }
+      // Per-frame keyframe states.
+      for (const frame of proj.frames) {
+        const states = frame.states[sub.id];
+        if (states) {
+          for (const sh of states) {
+            if (sh.stroke.enabled === undefined) sh.stroke.enabled = true;
+          }
+        }
+      }
+    }
+  }
   return proj;
 }
 
@@ -784,7 +808,7 @@ export const useRotoStore = create<RotoState>((set, get) => ({
    * 3. Boolean-union the new footprint with all those shapes.
    * 4. Replace the originals with the resulting merged shape(s).
    */
-  commitBlobStroke: (subLayerId, points, fillColor, radius, strokeColor, strokeWidth) =>
+  commitBlobStroke: (subLayerId, points, fillColor, radius, strokeColor, strokeWidth, strokeEnabled, fillEnabled) =>
     set((s) => {
       const frames = s.project.frames.slice();
       const idx = s.project.currentFrame;
@@ -817,12 +841,13 @@ export const useRotoStore = create<RotoState>((set, get) => ({
       const multi = booleanUnion(rings);
       let merged = multiPolygonToShapes(multi, {
         stroke: {
+          enabled: strokeEnabled,
           color: strokeColor,
           width: strokeWidth,
           jitter: 0,
           variance: 0,
         },
-        fill: { enabled: true, color: fillColor, closed: true },
+        fill: { enabled: fillEnabled, color: fillColor, closed: true },
       });
       // Safety net: if the boolean union produced zero shapes (e.g., the
       // polygon-clipping library rejected the input as degenerate), fall
@@ -841,12 +866,13 @@ export const useRotoStore = create<RotoState>((set, get) => ({
               id: uid("shape"),
               points,
               stroke: {
+                enabled: strokeEnabled,
                 color: strokeColor,
                 width: strokeWidth,
                 jitter: 0,
                 variance: 0,
               },
-              fill: { enabled: true, color: fillColor, closed: true },
+              fill: { enabled: fillEnabled, color: fillColor, closed: true },
               seed: Math.floor(Math.random() * 1e9),
             },
           ];

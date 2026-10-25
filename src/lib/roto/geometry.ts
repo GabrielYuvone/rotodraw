@@ -143,6 +143,7 @@ export function interpolateShapes(
     id: a.id,
     points,
     stroke: {
+      enabled: a.stroke.enabled,
       color: a.stroke.color,
       width: lerp(a.stroke.width, b.stroke.width, t),
       jitter: lerp(a.stroke.jitter, b.stroke.jitter, t),
@@ -486,6 +487,7 @@ export function multiPolygonToShapes(
       id: uid("shape"),
       points,
       stroke: base.stroke ?? {
+        enabled: true,
         color: "#000000",
         width: 2,
         jitter: 0,
@@ -509,6 +511,7 @@ export function ringToShape(ring: Ring, base: Partial<VectorShape>): VectorShape
     id: uid("shape"),
     points,
     stroke: base.stroke ?? {
+      enabled: true,
       color: "#000000",
       width: 2,
       jitter: 0,

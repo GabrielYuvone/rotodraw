@@ -709,7 +709,9 @@ export function RotoCanvas({ videoRef }: Props) {
           brush.fillColor,
           brush.blobBrushRadius,
           "#000000", // black comic outline
-          brush.drawStrokeWidth
+          brush.drawStrokeWidth,
+          brush.drawStrokeEnabled,
+          brush.drawFillEnabled
         );
       } else if (mode === "knife" && pts.length >= 2) {
         // Knife cuts don't benefit from smoothing — keep raw points.
@@ -724,13 +726,14 @@ export function RotoCanvas({ videoRef }: Props) {
           id: uid("shape"),
           points: pts,
           stroke: {
+            enabled: brush.drawStrokeEnabled,
             color: "#000000", // black comic outline by default
             width: brush.drawStrokeWidth,
             jitter: brush.drawStrokeJitter,
             variance: brush.drawStrokeVariance,
           },
           fill: {
-            enabled: true,
+            enabled: brush.drawFillEnabled,
             color: brush.fillColor,
             closed: brush.autoClose,
           },
@@ -1545,21 +1548,23 @@ function drawShape(
     ctx.fillStyle = tint === "red" ? "#ff4d4d" : tint === "green" ? "#4dff7a" : shape.fill.color;
     ctx.fill();
   }
-  // Stroke
-  ctx.beginPath();
-  ctx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length - 1; i++) {
-    const cur = pts[i];
-    const next = pts[i + 1];
-    ctx.quadraticCurveTo(cur.x, cur.y, (cur.x + next.x) / 2, (cur.y + next.y) / 2);
+  // Stroke (only if enabled)
+  if (shape.stroke.enabled) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length - 1; i++) {
+      const cur = pts[i];
+      const next = pts[i + 1];
+      ctx.quadraticCurveTo(cur.x, cur.y, (cur.x + next.x) / 2, (cur.y + next.y) / 2);
+    }
+    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+    if (shape.fill.closed) ctx.closePath();
+    ctx.strokeStyle = tint === "red" ? "#ff4d4d" : tint === "green" ? "#4dff7a" : shape.stroke.color;
+    ctx.lineWidth = shape.stroke.width * (1 + shape.stroke.variance * (Math.random() - 0.5));
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
   }
-  ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
-  if (shape.fill.closed) ctx.closePath();
-  ctx.strokeStyle = tint === "red" ? "#ff4d4d" : tint === "green" ? "#4dff7a" : shape.stroke.color;
-  ctx.lineWidth = shape.stroke.width * (1 + shape.stroke.variance * (Math.random() - 0.5));
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-  ctx.stroke();
   ctx.restore();
 }
 

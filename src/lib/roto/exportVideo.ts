@@ -73,29 +73,31 @@ function drawShape(ctx: CanvasRenderingContext2D, sh: VectorShape) {
     ctx.fillStyle = sh.fill.color;
     ctx.fill();
   }
-  // Stroke
-  ctx.beginPath();
-  ctx.moveTo(sh.points[0].x, sh.points[0].y);
-  for (let i = 1; i < sh.points.length - 1; i++) {
-    const cur = sh.points[i];
-    const next = sh.points[i + 1];
-    ctx.quadraticCurveTo(
-      cur.x,
-      cur.y,
-      (cur.x + next.x) / 2,
-      (cur.y + next.y) / 2
+  // Stroke (only if enabled)
+  if (sh.stroke.enabled) {
+    ctx.beginPath();
+    ctx.moveTo(sh.points[0].x, sh.points[0].y);
+    for (let i = 1; i < sh.points.length - 1; i++) {
+      const cur = sh.points[i];
+      const next = sh.points[i + 1];
+      ctx.quadraticCurveTo(
+        cur.x,
+        cur.y,
+        (cur.x + next.x) / 2,
+        (cur.y + next.y) / 2
+      );
+    }
+    ctx.lineTo(
+      sh.points[sh.points.length - 1].x,
+      sh.points[sh.points.length - 1].y
     );
+    if (sh.fill.closed) ctx.closePath();
+    ctx.strokeStyle = sh.stroke.color;
+    ctx.lineWidth = sh.stroke.width;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
   }
-  ctx.lineTo(
-    sh.points[sh.points.length - 1].x,
-    sh.points[sh.points.length - 1].y
-  );
-  if (sh.fill.closed) ctx.closePath();
-  ctx.strokeStyle = sh.stroke.color;
-  ctx.lineWidth = sh.stroke.width;
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-  ctx.stroke();
   ctx.restore();
 }
 
