@@ -711,50 +711,60 @@ export function RotoCanvas({ videoRef }: Props) {
         return;
       }
 
-      // Transforming selected shapes
+      // Transforming selected shapes (Select tool: move / scale / rotate).
+      // SNAPSHOT-BASED: we use the initial points captured at mousedown
+      // (`t.initialPoints`) and apply the TOTAL cursor displacement. This
+      // makes the shape follow the cursor 1:1 with no compounding — the
+      // previous incremental approach applied deltas to already-moved
+      // points each frame, causing "exaggerated" drift.
       if (transformRef.current) {
         const t = transformRef.current;
         const moveDx = p.x - t.start.x;
         const moveDy = p.y - t.start.y;
         const pivot = t.pivot;
         if (t.mode === "move") {
-          liveTransformShapes(
-            t.subLayerId,
-            t.shapeIds,
-            (pts) => pts.map((pt) => ({ x: pt.x + moveDx, y: pt.y + moveDy }))
-          );
+          for (const id of t.shapeIds) {
+            const init = t.initialPoints[id];
+            if (!init) continue;
+            const newPoints = init.map((pt) => ({
+              x: pt.x + moveDx,
+              y: pt.y + moveDy,
+            }));
+            liveTransformShapes(t.subLayerId, [id], () => newPoints);
+          }
         } else if (t.mode === "scale") {
           const initialDist =
             Math.hypot(t.start.x - pivot.x, t.start.y - pivot.y) || 1;
           const curDist = Math.hypot(p.x - pivot.x, p.y - pivot.y);
           const s = curDist / initialDist;
-          // Apply scale relative to pivot, using current points as the source
-          liveTransformShapes(t.subLayerId, t.shapeIds, (pts) =>
-            pts.map((pt) => {
-              const dxp = pt.x - pivot.x - moveDx;
-              const dyp = pt.y - pivot.y - moveDy;
-              return {
-                x: pivot.x + moveDx + dxp * s,
-                y: pivot.y + moveDy + dyp * s,
-              };
-            })
-          );
+          for (const id of t.shapeIds) {
+            const init = t.initialPoints[id];
+            if (!init) continue;
+            const newPoints = init.map((pt) => ({
+              x: pivot.x + (pt.x - pivot.x) * s,
+              y: pivot.y + (pt.y - pivot.y) * s,
+            }));
+            liveTransformShapes(t.subLayerId, [id], () => newPoints);
+          }
         } else if (t.mode === "rotate") {
           const a0 = Math.atan2(t.start.y - pivot.y, t.start.x - pivot.x);
           const a1 = Math.atan2(p.y - pivot.y, p.x - pivot.x);
           const da = a1 - a0;
           const cos = Math.cos(da);
           const sin = Math.sin(da);
-          liveTransformShapes(t.subLayerId, t.shapeIds, (pts) =>
-            pts.map((pt) => {
-              const dxp = pt.x - pivot.x - moveDx;
-              const dyp = pt.y - pivot.y - moveDy;
+          for (const id of t.shapeIds) {
+            const init = t.initialPoints[id];
+            if (!init) continue;
+            const newPoints = init.map((pt) => {
+              const dxp = pt.x - pivot.x;
+              const dyp = pt.y - pivot.y;
               return {
-                x: pivot.x + moveDx + dxp * cos - dyp * sin,
-                y: pivot.y + moveDy + dxp * sin + dyp * cos,
+                x: pivot.x + dxp * cos - dyp * sin,
+                y: pivot.y + dxp * sin + dyp * cos,
               };
-            })
-          );
+            });
+            liveTransformShapes(t.subLayerId, [id], () => newPoints);
+          }
         }
         return;
       }
