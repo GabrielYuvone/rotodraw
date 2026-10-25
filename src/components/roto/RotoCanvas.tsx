@@ -50,6 +50,9 @@ export function RotoCanvas({ videoRef }: Props) {
   const exitPanMode = useRotoStore((s) => s.exitPanMode);
   const panModePreviousTool = useRotoStore((s) => s.panModePreviousTool);
   const panModeSource = useRotoStore((s) => s.panModeSource);
+  const undo = useRotoStore((s) => s.undo);
+  const redo = useRotoStore((s) => s.redo);
+  const pushHistory = useRotoStore((s) => s.pushHistory);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -380,6 +383,9 @@ export function RotoCanvas({ videoRef }: Props) {
         //   - "global": find the parent layer of the active sub-layer, deform
         //     ALL its sub-layers within radius. No need to hit-test specific shape.
         //   - "local" (default): find the specific shape under cursor, deform only it.
+        // Push a single history snapshot for the entire deform drag so that
+        // one Ctrl+Z undoes the whole drag (not per-mousemove).
+        pushHistory();
         if (brush.deformScope === "global") {
           // Determine the parent layer containing the active sub-layer.
           let activeLayer: Layer | null = null;
@@ -449,6 +455,9 @@ export function RotoCanvas({ videoRef }: Props) {
             shapeId: nodeHit.shape.id,
             nodeIndex: nodeHit.nodeIndex,
           });
+          // Push a single history snapshot for the entire node drag so that
+          // one Ctrl+Z undoes the whole drag (not per-mousemove).
+          pushHistory();
           nodeDragRef.current = {
             subLayerId: nodeHit.subLayer.id,
             shapeId: nodeHit.shape.id,
@@ -477,6 +486,8 @@ export function RotoCanvas({ videoRef }: Props) {
             project.currentFrame,
             subLayerId
           ).filter((s) => selectedShapeIds.includes(s.id));
+          // Push a single history snapshot for the entire transform drag.
+          pushHistory();
           const allPoints = shapes.flatMap((s) => s.points);
           const bbox = shapeBBox(allPoints);
           const pivot = {
@@ -516,6 +527,7 @@ export function RotoCanvas({ videoRef }: Props) {
       toCanvasCoords,
       panModePreviousTool,
       panModeSource,
+      pushHistory,
     ]
   );
 
@@ -932,8 +944,27 @@ export function RotoCanvas({ videoRef }: Props) {
       ) {
         return;
       }
+      // Ctrl+Z (or Cmd+Z on Mac) = undo. Ctrl+Shift+Z / Ctrl+Y = redo.
+      // We handle these BEFORE the Z pan-mode check so that Ctrl+Z doesn't
+      // accidentally trigger pan mode.
+      if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
+        if (e.shiftKey) {
+          redo();
+        } else {
+          undo();
+        }
+        e.preventDefault();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "y") {
+        redo();
+        e.preventDefault();
+        return;
+      }
       // "Z" key — temporarily enter pan mode (don't repeat-fire on hold).
-      if ((e.key === "z" || e.key === "Z") && !e.repeat) {
+      // IMPORTANT: ignore Z when Ctrl/Cmd is held so that Ctrl+Z (undo) and
+      // Ctrl+Shift+Z (redo) work as expected instead of triggering pan mode.
+      if ((e.key === "z" || e.key === "Z") && !e.repeat && !e.ctrlKey && !e.metaKey) {
         enterPanMode("z");
         e.preventDefault();
         return;
@@ -1022,7 +1053,7 @@ export function RotoCanvas({ videoRef }: Props) {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [enterPanMode, exitPanMode, resetView]);
+  }, [enterPanMode, exitPanMode, resetView, undo, redo]);
 
   // ----- Render loop -----
 

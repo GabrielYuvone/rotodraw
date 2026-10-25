@@ -174,6 +174,16 @@ interface RotoState {
    * play/pause) from a Space HOLD+drag (which pans).
    */
   panModeSource: "z" | "space" | null;
+  /**
+   * Undo/redo history stacks. Each entry is a deep-cloned snapshot of the
+   * `project` state taken BEFORE a mutating action. We keep up to 50
+   * snapshots to bound memory. Undo pops from `undoStack`, pushes the
+   * current state to `redoStack`, and restores the snapshot. Redo does
+   * the reverse.
+   */
+  undoStack: RotoProject[];
+  redoStack: RotoProject[];
+
 
   // ---- Actions ----
   setVideo: (url: string, resolution: ResolutionConfig, frameCount: number) => void;
@@ -191,6 +201,16 @@ interface RotoState {
   setView: (partial: Partial<{ zoom: number; panX: number; panY: number }>) => void;
   /** Reset the canvas viewport to fit-to-container with no pan. */
   resetView: () => void;
+  /** Undo the last mutating action. No-op if the undo stack is empty. */
+  undo: () => void;
+  /** Redo the last undone action. No-op if the redo stack is empty. */
+  redo: () => void;
+  /**
+   * Push the current project state onto the undo stack and clear the redo
+   * stack. Called by mutating actions BEFORE they apply their change so
+   * that `undo` can restore the pre-change state.
+   */
+  pushHistory: () => void;
   /**
    * Enter temporary pan mode (Z or Space held). Remembers the previous tool
    * so it can be restored on `exitPanMode`. If already in pan mode, this is
@@ -464,6 +484,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
   view: { zoom: 1, panX: 0, panY: 0 },
   panModePreviousTool: null,
   panModeSource: null,
+  undoStack: [],
+  redoStack: [],
   setVideo: (url, resolution, frameCount) =>
     set((s) => {
       const frames = Array.from({ length: frameCount }, (_, i) => ({
@@ -520,28 +542,78 @@ export const useRotoStore = create<RotoState>((set, get) => ({
       };
     }),
 
-  toggleKeyframe: (index) =>
+  toggleKeyframe: (index) => {
+    get().pushHistory();
     set((s) => {
       const frames = s.project.frames.slice();
       const f = frames[index];
       if (!f) return {};
       frames[index] = { ...f, isKeyframe: !f.isKeyframe };
       return { project: { ...s.project, frames } };
-    }),
+    });
+  },
 
-  clearFrame: (index) =>
+  clearFrame: (index) => {
+    get().pushHistory();
     set((s) => {
       const frames = s.project.frames.slice();
       const f = frames[index];
       if (!f) return {};
       frames[index] = { ...f, isKeyframe: false, states: {} };
       return { project: { ...s.project, frames } };
-    }),
+    });
+  },
 
   setView: (partial) =>
     set((s) => ({ view: { ...s.view, ...partial } })),
 
   resetView: () => set({ view: { zoom: 1, panX: 0, panY: 0 } }),
+
+  /**
+   * Push a deep-cloned snapshot of the current project onto the undo stack
+   * and clear the redo stack. Called by mutating actions BEFORE they apply
+   * their change. We cap the undo stack at 50 entries to bound memory.
+   */
+  pushHistory: () =>
+    set((s) => {
+      const snapshot = JSON.parse(JSON.stringify(s.project)) as RotoProject;
+      const undoStack = [...s.undoStack, snapshot];
+      // Cap at 50 entries (drop the oldest).
+      if (undoStack.length > 50) undoStack.shift();
+      return { undoStack, redoStack: [] };
+    }),
+
+  undo: () =>
+    set((s) => {
+      if (s.undoStack.length === 0) return {};
+      const previous = s.undoStack[s.undoStack.length - 1];
+      const undoStack = s.undoStack.slice(0, -1);
+      // Push the CURRENT state onto the redo stack so it can be re-applied.
+      const currentSnapshot = JSON.parse(JSON.stringify(s.project)) as RotoProject;
+      const redoStack = [...s.redoStack, currentSnapshot];
+      return {
+        project: previous,
+        undoStack,
+        redoStack,
+        // Clear selection since the shape IDs may no longer exist.
+        selectedShapeIds: [],
+      };
+    }),
+
+  redo: () =>
+    set((s) => {
+      if (s.redoStack.length === 0) return {};
+      const next = s.redoStack[s.redoStack.length - 1];
+      const redoStack = s.redoStack.slice(0, -1);
+      const currentSnapshot = JSON.parse(JSON.stringify(s.project)) as RotoProject;
+      const undoStack = [...s.undoStack, currentSnapshot];
+      return {
+        project: next,
+        undoStack,
+        redoStack,
+        selectedShapeIds: [],
+      };
+    }),
 
   enterPanMode: (source) =>
     set((s) => {
@@ -567,7 +639,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
       };
     }),
 
-  commitShapes: (subLayerId, shapes) =>
+  commitShapes: (subLayerId, shapes) => {
+    get().pushHistory();
     set((s) => {
       const frames = s.project.frames.slice();
       const idx = s.project.currentFrame;
@@ -590,7 +663,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
       };
       frames[idx] = next;
       return { project: { ...s.project, frames } };
-    }),
+    });
+  },
 
   liveDeformShape: (subLayerId, shapeId, mutate) =>
     set((s) => {
@@ -819,7 +893,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
    * 4. The remaining pieces become independent VectorShape objects.
    * The result REPLACES all the original shapes that were cut.
    */
-  cutShapesWithKnife: (subLayerId, cutPath) =>
+  cutShapesWithKnife: (subLayerId, cutPath) => {
+    get().pushHistory();
     set((s) => {
       const frames = s.project.frames.slice();
       const idx = s.project.currentFrame;
@@ -889,9 +964,11 @@ export const useRotoStore = create<RotoState>((set, get) => ({
         states: { ...f.states, [subLayerId]: out },
       };
       return { project: { ...s.project, frames } };
-    }),
+    });
+  },
 
-  deleteShape: (subLayerId, shapeId) =>
+  deleteShape: (subLayerId, shapeId) => {
+    get().pushHistory();
     set((s) => {
       const frames = s.project.frames.slice();
       const idx = s.project.currentFrame;
@@ -912,9 +989,11 @@ export const useRotoStore = create<RotoState>((set, get) => ({
         project: { ...s.project, frames },
         selectedShapeIds: s.selectedShapeIds.filter((id) => id !== shapeId),
       };
-    }),
+    });
+  },
 
-  deleteNode: (subLayerId, shapeId, nodeIndex) =>
+  deleteNode: (subLayerId, shapeId, nodeIndex) => {
+    get().pushHistory();
     set((s) => {
       const frames = s.project.frames.slice();
       const idx = s.project.currentFrame;
@@ -945,9 +1024,11 @@ export const useRotoStore = create<RotoState>((set, get) => ({
         states: { ...f.states, [subLayerId]: next },
       };
       return { project: { ...s.project, frames } };
-    }),
+    });
+  },
 
-  setShapeFillColor: (subLayerId, shapeId, color) =>
+  setShapeFillColor: (subLayerId, shapeId, color) => {
+    get().pushHistory();
     set((s) => {
       const frames = s.project.frames.slice();
       const idx = s.project.currentFrame;
@@ -969,7 +1050,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
         states: { ...f.states, [subLayerId]: next },
       };
       return { project: { ...s.project, frames } };
-    }),
+    });
+  },
 
   liveMoveNode: (subLayerId, shapeId, nodeIndex, target) =>
     set((s) => {
@@ -1033,7 +1115,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
       };
     }),
 
-  toggleDrawingBreak: (subLayerId, frameIndex) =>
+  toggleDrawingBreak: (subLayerId, frameIndex) => {
+    get().pushHistory();
     set((s) => {
       const existingBreaks = (s.project.drawingBreaks?.[subLayerId] ?? []).slice();
       const has = existingBreaks.includes(frameIndex);
@@ -1062,7 +1145,8 @@ export const useRotoStore = create<RotoState>((set, get) => ({
           frames,
         },
       };
-    }),
+    });
+  },
 
   selectShapes: (ids) => set({ selectedShapeIds: ids }),
   clearSelection: () => set({ selectedShapeIds: [] }),
