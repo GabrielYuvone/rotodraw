@@ -100,7 +100,14 @@ export interface ResolutionConfig {
 }
 
 /** Tool modes for the unified multi-purpose brush. */
-export type ToolMode = "draw" | "blob" | "deform" | "knife" | "node" | "select";
+export type ToolMode =
+  | "draw"
+  | "pen"
+  | "blob"
+  | "deform"
+  | "knife"
+  | "node"
+  | "select";
 
 /** Deformation brush scope: which sub-layers a deform brush stroke affects. */
 export type DeformScope = "local" | "global";

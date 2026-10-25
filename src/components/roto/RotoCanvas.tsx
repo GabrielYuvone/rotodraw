@@ -53,9 +53,28 @@ export function RotoCanvas({ videoRef }: Props) {
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Offscreen canvas that caches the last successfully drawn video frame.
+  // This prevents black-frame flicker when the video is mid-seek: instead of
+  // clearing to black while the video element catches up, we re-draw the
+  // last known good frame. The cache is invalidated (cleared) whenever the
+  // video URL changes or the video fails to provide a frame.
+  const videoFrameCacheRef = useRef<HTMLCanvasElement | null>(null);
+  // Whether the <video> element is currently mid-seek. Set by the page's
+  // seekVideo callback via a window event — we listen for "roto-seek-start"
+  // and "roto-seek-end" custom events.
+  const videoSeekingRef = useRef<boolean>(false);
   const [displayScale, setDisplayScale] = useState(1);
   const [cursor, setCursor] = useState<Vec2 | null>(null);
   const [cursorOverCanvas, setCursorOverCanvas] = useState(false);
+  // Canvas's base (un-transformed) top-left position within the container, in
+  // container-space pixels. The container is `flex items-center justify-center`,
+  // so the canvas is naturally centered; this is its centered top-left. The
+  // CSS `transform: translate(panX, panY) scale(zoom)` is then applied on top.
+  // Used to position the BrushCursor / BlobCursor overlays correctly.
+  const [canvasBase, setCanvasBase] = useState<{ left: number; top: number }>({
+    left: 0,
+    top: 0,
+  });
   // Selected node index within the selected shape (for Node tool).
   const [selectedNode, setSelectedNode] = useState<{
     shapeId: string;
@@ -103,6 +122,14 @@ export function RotoCanvas({ videoRef }: Props) {
     shapeId: string;
     nodeIndex: number;
   } | null>(null);
+  // Pen-tool state: the in-progress polyline of anchor points. The user
+  // clicks to add anchors; we render a rubber-band preview from the last
+  // anchor to the cursor. Double-click or Enter finishes the path and commits
+  // it as a VectorShape. Escape cancels.
+  const penPathRef = useRef<{
+    subLayerId: string;
+    points: Vec2[];
+  } | null>(null);
   // Pan-mode drag state: when Z or Space is held, drag pans the canvas. Stores
   // the last cursor position so we can compute the delta on each mousemove.
   const panDragRef = useRef<{
@@ -123,18 +150,54 @@ export function RotoCanvas({ videoRef }: Props) {
     setSelectedNode(null);
   }, [brush.mode]);
 
+  // ----- Listen for video seek events from the page -----
+  // The page's seekVideo callback dispatches "roto-seek-start" before setting
+  // currentTime and "roto-seek-end" on the video's `seeked` event. We use this
+  // to know when the video element is mid-seek so the draw loop can fall back
+  // to the cached frame (preventing black-frame flicker).
+  useEffect(() => {
+    const onStart = () => {
+      videoSeekingRef.current = true;
+    };
+    const onEnd = () => {
+      videoSeekingRef.current = false;
+    };
+    window.addEventListener("roto-seek-start", onStart);
+    window.addEventListener("roto-seek-end", onEnd);
+    return () => {
+      window.removeEventListener("roto-seek-start", onStart);
+      window.removeEventListener("roto-seek-end", onEnd);
+    };
+  }, []);
+
   // ----- Display scale: fit canvas into container -----
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     const onResize = () => {
+      // Reserve 24px of padding around the canvas so it doesn't touch the
+      // container edges.
       const cw = container.clientWidth - 24;
       const ch = container.clientHeight - 24;
       const sw = project.resolution.workingWidth;
       const sh = project.resolution.workingHeight;
       const scale = Math.min(cw / sw, ch / sh, 2);
       setDisplayScale(scale);
+      // Compute the canvas's base (un-transformed) top-left position within
+      // the container. The container is `flex items-center justify-center`, so
+      // the canvas's natural centered position is:
+      //   baseLeft = (container.clientWidth - canvasDisplayW) / 2
+      //   baseTop  = (container.clientHeight - canvasDisplayH) / 2
+      // where canvasDisplayW = workingWidth * scale. We store this so the
+      // BrushCursor / BlobCursor overlays (which are positioned absolutely
+      // inside the container) can be placed correctly relative to the canvas
+      // after the CSS transform is applied.
+      const baseLeft =
+        (container.clientWidth - sw * scale) / 2;
+      const baseTop =
+        (container.clientHeight - sh * scale) / 2;
+      setCanvasBase({ left: baseLeft, top: baseTop });
     };
     onResize();
     const ro = new ResizeObserver(onResize);
@@ -282,6 +345,29 @@ export function RotoCanvas({ videoRef }: Props) {
       const p = toCanvasCoords(e);
       const mode = brush.mode;
       const activeSubLayerId = project.activeSubLayerId;
+
+      if (mode === "pen") {
+        // Pen tool: click adds an anchor. If there's already a pen path in
+        // progress and the click is very close to the last anchor, treat it
+        // as a finish (single click is enough on a degenerate case). The
+        // real "finish" is double-click or Enter (handled in the keyboard
+        // effect below).
+        if (!activeSubLayerId) return;
+        if (!penPathRef.current) {
+          penPathRef.current = {
+            subLayerId: activeSubLayerId,
+            points: [p],
+          };
+        } else {
+          // Don't add a duplicate point if the click is on top of the last
+          // anchor (this happens on a double-click's first click).
+          const last = penPathRef.current.points[penPathRef.current.points.length - 1];
+          if (Math.hypot(p.x - last.x, p.y - last.y) > 2) {
+            penPathRef.current.points.push(p);
+          }
+        }
+        return;
+      }
 
       if (mode === "draw" || mode === "blob" || mode === "knife") {
         if (!activeSubLayerId) return;
@@ -945,6 +1031,10 @@ export function RotoCanvas({ videoRef }: Props) {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    // Lazily create the offscreen video-frame cache canvas.
+    if (!videoFrameCacheRef.current) {
+      videoFrameCacheRef.current = document.createElement("canvas");
+    }
     drawFrame(ctx, canvas, {
       project,
       onion,
@@ -960,6 +1050,8 @@ export function RotoCanvas({ videoRef }: Props) {
         brush.mode === "blob"
           ? brush.blobBrushRadius
           : brush.deformRadius,
+      videoFrameCache: videoFrameCacheRef.current,
+      videoSeeking: videoSeekingRef.current,
     });
   }, [
     project,
@@ -982,6 +1074,9 @@ export function RotoCanvas({ videoRef }: Props) {
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d");
       if (canvas && ctx) {
+        if (!videoFrameCacheRef.current) {
+          videoFrameCacheRef.current = document.createElement("canvas");
+        }
         drawFrame(ctx, canvas, {
           project,
           onion,
@@ -997,6 +1092,8 @@ export function RotoCanvas({ videoRef }: Props) {
             brush.mode === "blob"
               ? brush.blobBrushRadius
               : brush.deformRadius,
+          videoFrameCache: videoFrameCacheRef.current,
+          videoSeeking: videoSeekingRef.current,
         });
       }
       raf = requestAnimationFrame(tick);
@@ -1067,16 +1164,16 @@ export function RotoCanvas({ videoRef }: Props) {
       />
       {cursor && cursorOverCanvas && brush.mode === "deform" && (
         <BrushCursor
-          x={cursor.x * displayScale * view.zoom + view.panX}
-          y={cursor.y * displayScale * view.zoom + view.panY}
+          x={canvasBase.left + cursor.x * displayScale * view.zoom + view.panX}
+          y={canvasBase.top + cursor.y * displayScale * view.zoom + view.panY}
           radius={brush.deformRadius * displayScale * view.zoom}
           strength={brush.deformStrength}
         />
       )}
       {cursor && cursorOverCanvas && brush.mode === "blob" && (
         <BlobCursor
-          x={cursor.x * displayScale * view.zoom + view.panX}
-          y={cursor.y * displayScale * view.zoom + view.panY}
+          x={canvasBase.left + cursor.x * displayScale * view.zoom + view.panX}
+          y={canvasBase.top + cursor.y * displayScale * view.zoom + view.panY}
           radius={brush.blobBrushRadius * displayScale * view.zoom}
         />
       )}
@@ -1116,6 +1213,15 @@ interface DrawArgs {
   displayScale: number;
   mode: ToolMode;
   brushRadius: number;       // for blob/deform live preview
+  /**
+   * Offscreen canvas that caches the last successfully drawn video frame.
+   * When the video is mid-seek (or otherwise not ready), we draw the cached
+   * frame instead of clearing to black — this prevents the "alternating black
+   * frame" flicker the user observed during playback.
+   */
+  videoFrameCache: HTMLCanvasElement | null;
+  /** True when the <video> element is mid-seek. */
+  videoSeeking: boolean;
 }
 
 function drawFrame(
@@ -1123,11 +1229,17 @@ function drawFrame(
   canvas: HTMLCanvasElement,
   args: DrawArgs
 ) {
-  const { project, onion, selectedShapeIds, selectedNode, drawing, selecting, video, mode, brushRadius } = args;
+  const { project, onion, selectedShapeIds, selectedNode, drawing, selecting, video, mode, brushRadius, videoFrameCache, videoSeeking } = args;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // --- Background: current video frame (if video element available & ready)
-  if (video && video.readyState >= 2) {
+  // --- Background: current video frame.
+  // Strategy: try to draw the live video frame. If the video is mid-seek
+  // (videoSeeking === true) OR drawImage throws, fall back to the cached
+  // frame. If no cache exists yet, fall back to a dark fill. When we
+  // successfully draw a fresh video frame, we also write it into the cache
+  // so it's available for the next seek.
+  let drewVideo = false;
+  if (video && video.readyState >= 2 && !videoSeeking) {
     try {
       ctx.drawImage(
         video,
@@ -1140,13 +1252,56 @@ function drawFrame(
         project.resolution.workingWidth,
         project.resolution.workingHeight
       );
+      drewVideo = true;
+      // Cache this frame for fallback during the next seek.
+      if (videoFrameCache) {
+        const cctx = videoFrameCache.getContext("2d");
+        if (cctx) {
+          // Only resize the cache if dimensions changed.
+          if (
+            videoFrameCache.width !== project.resolution.workingWidth ||
+            videoFrameCache.height !== project.resolution.workingHeight
+          ) {
+            videoFrameCache.width = project.resolution.workingWidth;
+            videoFrameCache.height = project.resolution.workingHeight;
+          }
+          cctx.drawImage(
+            video,
+            0,
+            0,
+            video.videoWidth,
+            video.videoHeight,
+            0,
+            0,
+            project.resolution.workingWidth,
+            project.resolution.workingHeight
+          );
+        }
+      }
     } catch {
-      // ignore — drawImage can throw on cross-origin, but blob URLs are same-origin
+      // drawImage can throw on cross-origin, but blob URLs are same-origin.
+      // Fall through to the cache fallback below.
     }
-  } else {
-    // Fallback checkerboard
-    ctx.fillStyle = "#222";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  if (!drewVideo) {
+    // Fall back to the cached video frame if available.
+    if (videoFrameCache && videoFrameCache.width > 0 && videoFrameCache.height > 0) {
+      ctx.drawImage(
+        videoFrameCache,
+        0,
+        0,
+        videoFrameCache.width,
+        videoFrameCache.height,
+        0,
+        0,
+        project.resolution.workingWidth,
+        project.resolution.workingHeight
+      );
+    } else {
+      // No cache yet — dark fill as a last resort.
+      ctx.fillStyle = "#222";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
   }
 
   // --- Onion skinning: ghost prev/next frames

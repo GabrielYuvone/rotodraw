@@ -33,18 +33,36 @@ export default function Home() {
     }
   }, [videoUrl]);
 
-  // Seek the hidden video element to a specific time (seconds)
+  // Seek the hidden video element to a specific time (seconds).
+  // We dispatch "roto-seek-start" before setting currentTime so the canvas
+  // knows the video is mid-seek and can fall back to the cached frame
+  // (preventing black-frame flicker). The video's `seeked` event then
+  // dispatches "roto-seek-end" to signal that the new frame is ready.
   const seekVideo = useCallback((timeSec: number) => {
     const v = videoRef.current;
     if (!v || !v.src) return;
     if (Math.abs(v.currentTime - timeSec) > 0.001) {
+      window.dispatchEvent(new CustomEvent("roto-seek-start"));
       try {
         v.currentTime = Math.max(0, timeSec);
       } catch {
         // ignore
+        window.dispatchEvent(new CustomEvent("roto-seek-end"));
       }
     }
   }, []);
+
+  // When the video finishes seeking, notify the canvas so it can switch
+  // back to drawing the live video frame (instead of the cache).
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onSeeked = () => {
+      window.dispatchEvent(new CustomEvent("roto-seek-end"));
+    };
+    v.addEventListener("seeked", onSeeked);
+    return () => v.removeEventListener("seeked", onSeeked);
+  }, [videoUrl]);
 
   // Seek when frame changes
   useEffect(() => {
