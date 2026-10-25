@@ -400,6 +400,9 @@ export function PropertiesPanel() {
               <li>Use <kbd>[</kbd> / <kbd>]</kbd> to adjust the Deform / Blob brush radius (the wheel is reserved for zoom).</li>
               <li><strong>Smoothing</strong>: in Draw / Blob mode, raise the Smoothing slider (0–5) for cleaner, more elegant curves from raw hand input.</li>
               <li><strong>Deform</strong>: drag with the brush to nudge points toward where you started — points follow the cursor proportional to strength × falloff, with no compounding.</li>
+              <li><strong>Optical Flow (Vector-EbSynth)</strong>: toggle the ⚡ switch in the timeline, set flow strength, then click "Propagate →" to shift vector nodes forward across frames following the video's motion. Pause at any frame to manually correct — the corrected frame becomes the new ground truth. Click Propagate again to resume from there.</li>
+              <li><strong>Rotoshop Control Loop</strong>: <kbd>Space</kbd> tap = play/pause · scrub the slider to any frame · draw/deform to correct · the corrected frame auto-promotes to keyframe · resume playback propagates from the corrected state.</li>
+              <li><strong>Playback speed</strong>: use the 0.25× / 0.5× / 1× / 2× buttons in the timeline for fine-grained review.</li>
             </ul>
           </section>
         </div>

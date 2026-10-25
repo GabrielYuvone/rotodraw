@@ -105,7 +105,7 @@ export default function Home() {
           <div className="flex-1 min-h-0 p-3">
             <RotoCanvas videoRef={videoRef} />
           </div>
-          <Timeline />
+          <Timeline videoRef={videoRef} />
         </main>
 
         {/* Right: Properties */}

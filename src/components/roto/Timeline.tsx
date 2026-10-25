@@ -14,6 +14,9 @@ import {
   Film,
   Unlink,
   Link2,
+  Zap,
+  Loader2,
+  Gauge,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,9 +35,22 @@ import {
 } from "@/lib/roto/store";
 import { useEffect, useState } from "react";
 
-export function Timeline() {
+interface TimelineProps {
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+}
+
+export function Timeline({ videoRef }: TimelineProps) {
   const project = useRotoStore((s) => s.project);
   const onion = useRotoStore((s) => s.onion);
+  const playbackSpeed = useRotoStore((s) => s.playbackSpeed);
+  const setPlaybackSpeed = useRotoStore((s) => s.setPlaybackSpeed);
+  const flowEnabled = useRotoStore((s) => s.flowEnabled);
+  const setFlowEnabled = useRotoStore((s) => s.setFlowEnabled);
+  const flowStrength = useRotoStore((s) => s.flowStrength);
+  const setFlowStrength = useRotoStore((s) => s.setFlowStrength);
+  const propagating = useRotoStore((s) => s.propagating);
+  const propagationProgress = useRotoStore((s) => s.propagationProgress);
+  const propagateFlow = useRotoStore((s) => s.propagateFlow);
   const setCurrentFrame = useRotoStore((s) => s.setCurrentFrame);
   const toggleKeyframe = useRotoStore((s) => s.toggleKeyframe);
   const clearFrame = useRotoStore((s) => s.clearFrame);
@@ -42,6 +58,7 @@ export function Timeline() {
   const toggleDrawingBreak = useRotoStore((s) => s.toggleDrawingBreak);
   const activeSubLayerId = project.activeSubLayerId;
   const currentFrame = project.currentFrame;
+  const currentFrameObj = project.frames[currentFrame];
   const hasBreak =
     activeSubLayerId != null &&
     hasDrawingBreak(project, activeSubLayerId, currentFrame);
@@ -51,7 +68,7 @@ export function Timeline() {
   const lastTimeRef = useRef<number>(0);
   const frameAccumRef = useRef<number>(0);
 
-  // Playback loop
+  // Playback loop — uses playbackSpeed multiplier.
   useEffect(() => {
     if (!playing) {
       cancelAnimationFrame(rafRef.current);
@@ -62,7 +79,7 @@ export function Timeline() {
     const tick = (now: number) => {
       const dt = (now - lastTimeRef.current) / 1000;
       lastTimeRef.current = now;
-      frameAccumRef.current += dt * project.fps;
+      frameAccumRef.current += dt * project.fps * playbackSpeed;
       if (frameAccumRef.current >= 1) {
         const steps = Math.floor(frameAccumRef.current);
         frameAccumRef.current -= steps;
@@ -73,7 +90,7 @@ export function Timeline() {
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [playing, project.fps, project.currentFrame, project.frameCount, setCurrentFrame]);
+  }, [playing, project.fps, project.currentFrame, project.frameCount, setCurrentFrame, playbackSpeed]);
 
   const onScrub = useCallback(
     (val: number) => {
@@ -163,7 +180,111 @@ export function Timeline() {
           </span>
           <span className="text-muted-foreground">·</span>
           <span className="font-mono">{project.fps} FPS</span>
+          <span className="text-muted-foreground">·</span>
+          {currentFrameObj?.isKeyframe ? (
+            <span className="text-primary font-medium flex items-center gap-0.5">
+              <Diamond className="h-3 w-3 fill-primary text-primary" />
+              KF
+            </span>
+          ) : (
+            <span className="text-muted-foreground">in-between</span>
+          )}
         </div>
+
+        {/* Playback speed control */}
+        <div className="flex items-center gap-1 rounded-md border border-input p-0.5">
+          <Gauge className="h-3 w-3 text-muted-foreground ml-1" />
+          {[
+            { v: 0.25, label: "0.25×" },
+            { v: 0.5, label: "0.5×" },
+            { v: 1, label: "1×" },
+            { v: 2, label: "2×" },
+          ].map((opt) => (
+            <button
+              key={opt.v}
+              onClick={() => setPlaybackSpeed(opt.v)}
+              className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors
+                ${
+                  playbackSpeed === opt.v
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Optical Flow Propagation */}
+        <TooltipProvider delayDuration={300}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="flex items-center gap-1.5 rounded-md border border-input p-0.5 px-2">
+                <Zap
+                  className={`h-3.5 w-3.5 ${
+                    flowEnabled ? "text-primary" : "text-muted-foreground"
+                  }`}
+                />
+                <Switch
+                  checked={flowEnabled}
+                  onCheckedChange={setFlowEnabled}
+                  className="scale-75"
+                />
+                {flowEnabled && (
+                  <div className="flex items-center gap-1 ml-1">
+                    <Slider
+                      value={[flowStrength]}
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      onValueChange={(v) => setFlowStrength(v[0])}
+                      className="w-16"
+                    />
+                    <span className="text-[10px] font-mono w-8">
+                      {flowStrength.toFixed(1)}×
+                    </span>
+                  </div>
+                )}
+                <Button
+                  size="sm"
+                  variant={flowEnabled ? "default" : "outline"}
+                  className="h-6 px-2 text-[10px] ml-1"
+                  disabled={
+                    !flowEnabled ||
+                    propagating ||
+                    !activeSubLayerId ||
+                    project.currentFrame >= project.frameCount - 1
+                  }
+                  onClick={() => {
+                    if (!videoRef.current) return;
+                    propagateFlow(
+                      videoRef.current,
+                      project.currentFrame,
+                      project.frameCount - 1
+                    );
+                  }}
+                >
+                  {propagating ? (
+                    <>
+                      <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                      {propagationProgress}%
+                    </>
+                  ) : (
+                    "Propagate →"
+                  )}
+                </Button>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-xs">
+              Optical Flow Propagation (Vector-EbSynth): enable, then click
+              "Propagate →" to shift vector nodes forward across frames
+              following the video's motion. Pause at any frame to manually
+              correct with Deform/Node tools — the corrected frame becomes
+              the new ground truth. Click Propagate again to resume from
+              there.
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
 
         <div className="flex-1" />
 

@@ -27,6 +27,12 @@ import {
   strokeToPolygon,
   uid,
 } from "./geometry";
+import {
+  computeOpticalFlow,
+  extractGrayscaleFrame,
+  propagatePointsByFlow,
+  seekVideoAndWait,
+} from "./opticalFlow";
 
 // -------- Default starter project (demo "Remera" + "Cara") --------
 
@@ -188,6 +194,26 @@ interface RotoState {
    */
   undoStack: RotoProject[];
   redoStack: RotoProject[];
+  /**
+   * Playback speed multiplier (0.25, 0.5, 1, 2). The playback loop
+   * advances frames at `fps * playbackSpeed` per second.
+   */
+  playbackSpeed: number;
+  /**
+   * Whether optical-flow propagation is enabled. When enabled, a
+   * "Propagate" button in the timeline takes the active sub-layer's
+   * shapes at the current frame and propagates them forward across
+   * subsequent frames using the video's optical flow, creating
+   * keyframes at each frame. The user can pause at any frame,
+   * manually correct, and re-propagate from there.
+   */
+  flowEnabled: boolean;
+  /** Optical flow strength multiplier (0 = no motion, 1 = full flow, >1 = exaggerated). */
+  flowStrength: number;
+  /** Whether propagation is currently running (shows a progress indicator). */
+  propagating: boolean;
+  /** Propagation progress 0..100. */
+  propagationProgress: number;
 
 
   // ---- Actions ----
@@ -202,6 +228,23 @@ interface RotoState {
   setCurrentFrame: (index: number) => void;
   toggleKeyframe: (index: number) => void;
   clearFrame: (index: number) => void;
+  /** Set the playback speed multiplier. */
+  setPlaybackSpeed: (speed: number) => void;
+  /** Toggle optical flow propagation on/off. */
+  setFlowEnabled: (enabled: boolean) => void;
+  /** Set the optical flow strength multiplier. */
+  setFlowStrength: (strength: number) => void;
+  /**
+   * Propagate the active sub-layer's shapes from `startFrame` to
+   * `endFrame` using the video's optical flow. Creates keyframes at
+   * each intermediate frame. The video element must be available for
+   * frame extraction.
+   */
+  propagateFlow: (
+    video: HTMLVideoElement,
+    startFrame: number,
+    endFrame: number
+  ) => Promise<void>;
   /** Set the canvas viewport (zoom and/or pan). Partial updates merge. */
   setView: (partial: Partial<{ zoom: number; panX: number; panY: number }>) => void;
   /** Reset the canvas viewport to fit-to-container with no pan. */
@@ -526,6 +569,11 @@ export const useRotoStore = create<RotoState>((set, get) => ({
   panModeSource: null,
   undoStack: [],
   redoStack: [],
+  playbackSpeed: 1,
+  flowEnabled: false,
+  flowStrength: 1,
+  propagating: false,
+  propagationProgress: 0,
   setVideo: (url, resolution, frameCount) =>
     set((s) => {
       const frames = Array.from({ length: frameCount }, (_, i) => ({
@@ -602,6 +650,89 @@ export const useRotoStore = create<RotoState>((set, get) => ({
       frames[index] = { ...f, isKeyframe: false, states: {} };
       return { project: { ...s.project, frames } };
     });
+  },
+
+  setPlaybackSpeed: (speed) => set({ playbackSpeed: speed }),
+
+  setFlowEnabled: (enabled) => set({ flowEnabled: enabled }),
+
+  setFlowStrength: (strength) => set({ flowStrength: strength }),
+
+  propagateFlow: async (video, startFrame, endFrame) => {
+    const s = get();
+    const { project } = s;
+    const activeSubLayerId = project.activeSubLayerId;
+    if (!activeSubLayerId || !video) return;
+
+    // Get the shapes at the start frame (the "ground truth").
+    let currentShapes = getInterpolatedShapesForFrame(project, startFrame, activeSubLayerId);
+    if (currentShapes.length === 0) return;
+
+    // Push a single history snapshot for the whole propagation.
+    s.pushHistory();
+    set({ propagating: true, propagationProgress: 0 });
+
+    const { workingWidth, workingHeight } = project.resolution;
+    const fps = project.fps;
+    const totalFrames = endFrame - startFrame;
+
+    // For each frame from startFrame+1 to endFrame:
+    //   1. Seek video to frame N-1, extract grayscale → frameA
+    //   2. Seek video to frame N, extract grayscale → frameB
+    //   3. Compute optical flow from frameA → frameB
+    //   4. Propagate each shape's points by the flow × strength
+    //   5. Write the propagated shapes as a keyframe at frame N
+    for (let frame = startFrame + 1; frame <= endFrame; frame++) {
+      const prevTime = (frame - 1) / fps;
+      const currTime = frame / fps;
+
+      // Seek to previous frame.
+      await seekVideoAndWait(video, prevTime);
+      await new Promise((r) => setTimeout(r, 30));
+      const frameA = extractGrayscaleFrame(video, workingWidth, workingHeight);
+      if (!frameA) {
+        set({ propagationProgress: Math.round(((frame - startFrame) / totalFrames) * 100) });
+        continue;
+      }
+
+      // Seek to current frame.
+      await seekVideoAndWait(video, currTime);
+      await new Promise((r) => setTimeout(r, 30));
+      const frameB = extractGrayscaleFrame(video, workingWidth, workingHeight);
+      if (!frameB) {
+        set({ propagationProgress: Math.round(((frame - startFrame) / totalFrames) * 100) });
+        continue;
+      }
+
+      // Compute optical flow.
+      const flow = computeOpticalFlow(frameA, frameB, workingWidth, workingHeight, 16, 8);
+
+      // Propagate each shape's points.
+      const strength = get().flowStrength;
+      currentShapes = currentShapes.map((sh) => ({
+        ...sh,
+        points: propagatePointsByFlow(sh.points, flow, strength),
+      }));
+
+      // Write the propagated shapes as a keyframe at this frame.
+      set((st) => {
+        const frames = st.project.frames.slice();
+        const f = frames[frame];
+        if (!f) return {};
+        frames[frame] = {
+          ...f,
+          isKeyframe: true,
+          states: { ...f.states, [activeSubLayerId]: currentShapes.map((sh) => ({ ...sh, points: sh.points.map((p) => ({ x: p.x, y: p.y })) })) },
+        };
+        return { project: { ...st.project, frames } };
+      });
+
+      set({ propagationProgress: Math.round(((frame - startFrame) / totalFrames) * 100) });
+    }
+
+    set({ propagating: false, propagationProgress: 100 });
+    // Reset progress after a short delay.
+    setTimeout(() => set({ propagationProgress: 0 }), 2000);
   },
 
   setView: (partial) =>
